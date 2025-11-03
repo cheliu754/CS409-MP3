@@ -1,11 +1,10 @@
-module.exports = function (router) {
+import express from "express";
 
-    var homeRoute = router.route('/');
+const router = express.Router();
 
-    homeRoute.get(function (req, res) {
-        var connectionString = process.env.TOKEN;
-        res.json({ message: 'My connection string is ' + connectionString });
-    });
+router.get("/", (req, res) => {
+  const connectionString = process.env.TOKEN;
+  res.json({ message: `My connection string is ${connectionString}` });
+});
 
-    return router;
-}
+export default router;
