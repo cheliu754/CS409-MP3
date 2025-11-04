@@ -246,12 +246,16 @@ router.get("/:id", async (req, res, next) => {
  */
 router.put("/:id", async (req, res, next) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return notFound(res, "task not found");
+    }
+    const task = await Task.findById(req.params.id);
+    if (!task) return notFound(res, "task not found");
+
     const { name, deadline } = req.body || {};
     if (!name || !deadline) return badRequest(res, "name and deadline are required");
     if (!isISODateLike(deadline)) return badRequest(res, "invalid deadline format");
 
-    const task = await Task.findById(req.params.id);
-    if (!task) return notFound(res, "task not found");
     const before = task.toObject();
 
     if (before.completed === true) {

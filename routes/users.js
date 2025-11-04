@@ -181,11 +181,15 @@ router.get("/:id", async (req, res, next) => {
  */
 router.put("/:id", async (req, res, next) => {
   try {
-    const { name, email } = req.body || {};
-    if (!name || !email) return badRequest(res, "name and email are required");
-
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return notFound(res, "user not found");
+    }
+    
     const user = await User.findById(req.params.id);
     if (!user) return notFound(res, "user not found");
+
+    const { name, email } = req.body || {};
+    if (!name || !email) return badRequest(res, "name and email are required");
 
     const oldName = user.name;
     const oldSet = new Set((user.pendingTasks || []).map((x) => String(x)));
