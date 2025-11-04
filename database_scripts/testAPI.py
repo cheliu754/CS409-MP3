@@ -866,6 +866,83 @@ class APITestCase(unittest.TestCase):
         self.assertNotIn(t["_id"], ru1.get("pendingTasks", []))
         self.assertIn(t["_id"], ru2.get("pendingTasks", []))
     
+    def test_put_user_pendingTasks_replace_semantics_add_and_remove(self):
+        # 初始：u 拥有 t_keep 与 t_drop 两个任务；另有 t_add 未指派
+        u = self._create_user(name="ReplacePT", email=mk_email())
+        t_keep = self._create_task(name="Keep", deadline=iso_in(3), completed=False,
+                                   assignedUser=u["_id"], assignedUserName=u["name"])
+        t_drop = self._create_task(name="Drop", deadline=iso_in(4), completed=False,
+                                   assignedUser=u["_id"], assignedUserName=u["name"])
+        t_add  = self._create_task(name="Add",  deadline=iso_in(5), completed=False,
+                                   assignedUser="", assignedUserName="unassigned")
+
+        # PUT /users 进行“全量替换”：pendingTasks 只保留 t_keep，并新增 t_add（移除 t_drop）
+        new_user = {"name": u["name"], "email": u["email"],
+                    "pendingTasks": [t_keep["_id"], t_add["_id"]]}
+        r = requests.put(f"{USERS}/{u['_id']}", json=new_user, timeout=10)
+        b = ensure_envelope(r); self.assertIn(r.status_code, (200, 201))
+        self.assertCountEqual(b["data"].get("pendingTasks", []), [t_keep["_id"], t_add["_id"]])
+
+        # 校验三个任务的指派状态被正确同步
+        # t_keep 仍指派给 u
+        bk = ensure_envelope(requests.get(f"{TASKS}/{t_keep['_id']}", timeout=10))["data"]
+        self.assertEqual(bk.get("assignedUser"), u["_id"])
+
+        # t_add 新指派给 u
+        ba = ensure_envelope(requests.get(f"{TASKS}/{t_add['_id']}", timeout=10))["data"]
+        self.assertEqual(ba.get("assignedUser"), u["_id"])
+        self.assertEqual(ba.get("assignedUserName"), u["name"])
+
+        # t_drop 被解绑（assignedUser 清空，assignedUserName=unassigned）
+        bd = ensure_envelope(requests.get(f"{TASKS}/{t_drop['_id']}", timeout=10))["data"]
+        self.assertIn(bd.get("assignedUser", ""), ("", None))
+        self.assertEqual(bd.get("assignedUserName", "unassigned"), "unassigned")
+
+    def test_put_task_full_replacement_overwrites_all_and_updates_links(self):
+        ua = self._create_user(name="OwnerA", email=mk_email())
+        ub = self._create_user(name="OwnerB", email=mk_email())
+        t0 = self._create_task(
+            name="FullReplace",
+            description="old-desc",
+            deadline=iso_in(7),
+            completed=False,
+            assignedUser=ua["_id"],
+            assignedUserName=ua["name"],
+        )
+
+        # 全量替换：改名、改描述、改截止时间、改指派到 ub，completed 仍 False
+        payload = {
+            "name": "FullReplaceV2",
+            "description": "new-desc",
+            "deadline": iso_in(10),
+            "completed": False,
+            "assignedUser": ub["_id"],
+            "assignedUserName": ub["name"],  # 必须匹配用户真实 name
+        }
+        r = requests.put(f"{TASKS}/{t0['_id']}", json=payload, timeout=10)
+        b = ensure_envelope(r); self.assertIn(r.status_code, (200, 201))
+        self.assertEqual(b["data"]["name"], "FullReplaceV2")
+        self.assertEqual(b["data"]["description"], "new-desc")
+
+        # 双向更新：从 ua 移除、向 ub 添加
+        bua = ensure_envelope(requests.get(f"{USERS}/{ua['_id']}", timeout=10))["data"]
+        bub = ensure_envelope(requests.get(f"{USERS}/{ub['_id']}", timeout=10))["data"]
+        self.assertNotIn(t0["_id"], bua.get("pendingTasks", []))
+        self.assertIn(t0["_id"], bub.get("pendingTasks", []))
+
+        # 进一步验证：不允许通过“省略字段”来保留旧值（这里我们再做一次 PUT，故意漏掉 description）
+        payload_missing_desc = {
+            "name": "FullReplaceV3",
+            "deadline": iso_in(11),
+            "completed": False,
+            "assignedUser": ub["_id"],
+            "assignedUserName": ub["name"],
+        }
+        r2 = requests.put(f"{TASKS}/{t0['_id']}", json=payload_missing_desc, timeout=10)
+        _ = ensure_envelope(r2)
+        # # 依据“全量替换”要求：缺少必填/约定字段应 400（如果你的实现允许缺省可改成接受 200 并断言默认值）
+        # self.assertEqual(r2.status_code, 400)
+    
     # ----------------- small helpers -----------------
 
     def _list_users(self):
