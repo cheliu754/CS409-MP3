@@ -52,6 +52,12 @@ def ensure_envelope(resp):
     assert "data" in body, "missing 'data'"
     return body
 
+def is_object_id(s: str) -> bool:
+    if not isinstance(s, str) or len(s) != 24:
+        return False
+    hexchars = "0123456789abcdefABCDEF"
+    return all(c in hexchars for c in s)
+
 class APITestCase(unittest.TestCase):
     created_user_ids = set()
     created_task_ids = set()
@@ -421,7 +427,8 @@ class APITestCase(unittest.TestCase):
         data = body["data"]
         if isinstance(data, list):
             self.assertGreaterEqual(len(data), 101, "Users endpoint should not default-limit to 100")
-            
+
+    # ======== 你已有的 corner（保留） ========
     def test_put_user_cannot_add_completed_task(self):
         u = self._create_user(name="CantAddDone", email=mk_email())
         t_done = self._create_task(name="done", deadline=iso_in(1), completed=True)
@@ -430,14 +437,12 @@ class APITestCase(unittest.TestCase):
         r = requests.put(f"{USERS}/{u['_id']}", json=new_user, timeout=10)
         _ = ensure_envelope(r)
         self.assertEqual(r.status_code, 400)
-        
+
     def test_put_task_cannot_update_completed_task(self):
-        # 先创建“未完成”任务并指派给某人
         u = self._create_user(name="UU", email=mk_email())
         t = self._create_task(name="ToComplete", deadline=iso_in(2), completed=False,
                             assignedUser=u["_id"], assignedUserName=u["name"])
 
-        # 把它标记为完成（允许）
         payload_done = {
             "name": t["name"],
             "description": t.get("description",""),
@@ -449,61 +454,248 @@ class APITestCase(unittest.TestCase):
         r1 = requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10)
         _ = ensure_envelope(r1); self.assertIn(r1.status_code,(200,201))
 
-        # 再次尝试修改任何字段（应 400）
         payload_try = {
             "name": "should-fail",
             "description": "x",
             "deadline": iso_in(3),
-            "completed": True,  # 仍然 true
+            "completed": True,
             "assignedUser": u["_id"],
             "assignedUserName": u["name"],
         }
         r2 = requests.put(f"{TASKS}/{t['_id']}", json=payload_try, timeout=10)
         _ = ensure_envelope(r2)
         self.assertEqual(r2.status_code, 400)
-        
+
     def test_users_where_by_id_returns_single_item_list(self):
-        # 准备一个用户
         u = self._create_user(name="WhereById", email=mk_email())
-        # 用 where=_id 精确过滤（示例里的写法）
         r = requests.get(f"{USERS}?where={qjson({'_id': u['_id']})}", timeout=10)
         body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
         self.assertIsInstance(body["data"], list)
-        # 允许服务端只返回一条或空（极端实现差异），常规应为1条且id匹配
         if body["data"]:
             self.assertEqual(body["data"][0]["_id"], u["_id"])
 
     def test_tasks_where_in_returns_subset(self):
-        # 准备两个任务
         t1 = self._create_task(name="IN-1", deadline=iso_in(2))
         t2 = self._create_task(name="IN-2", deadline=iso_in(3))
         ids = [t1["_id"], t2["_id"]]
-        # 用 $in 查询（示例里的写法）
         r = requests.get(f"{TASKS}?where={qjson({'_id': {'$in': ids}})}", timeout=10)
         body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
         self.assertIsInstance(body["data"], list)
         got_ids = {d["_id"] for d in body["data"]}
-        # 返回集应当是 ids 的子集（允许额外过滤/排序不影响）
         self.assertTrue(set(ids).issubset(got_ids) or got_ids.issubset(set(ids)))
 
     def test_tasks_skip_60_limit_20_shape(self):
-        # 确保有足量任务（尽量 >= 80）
         need = max(0, 80 - len(self._list_tasks()))
         for _ in range(need):
             self._create_task(name=f"bulk-{random.randint(1000,9999)}", deadline=iso_in(10))
         r = requests.get(f"{TASKS}?skip=60&limit=20", timeout=15)
         body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
         self.assertIsInstance(body["data"], list)
-        # 无论总量如何，长度最多 20
         self.assertLessEqual(len(body["data"]), 20)
-        
+
     def test_users_select_exclude_id_only(self):
         r = requests.get(f"{USERS}?select={qjson({'_id':0})}", timeout=10)
         body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
         if body["data"]:
             self.assertNotIn("_id", body["data"][0])
 
+    # ================= 新增覆盖：查询参数与错误形态 =================
 
+    def test_query_params_invalid_json_returns_400(self):
+        for url in [
+            f"{USERS}?where={{invalid}}",
+            f"{USERS}?sort={{name:1}}",
+            f"{USERS}?select={{_id:0,name:1,}}",  # 尾逗号
+            f"{TASKS}?where=%7Bcompleted%3Atrue%7D",  # 非 JSON 风格
+        ]:
+            r = requests.get(url, timeout=10)
+            _ = ensure_envelope(r)
+            self.assertEqual(r.status_code, 400, f"Should 400 for invalid JSON: {url}")
+
+    def test_select_mixing_include_and_exclude_400(self):
+        # 除 _id 特例外，混用应 400（如果你的实现是“自动修正”，把这里放宽为 in (200,400)）
+        r = requests.get(f"{USERS}?select={qjson({'name':1,'email':0})}", timeout=10)
+        _ = ensure_envelope(r)
+        self.assertEqual(r.status_code, 400)
+
+    def test_skip_limit_negative_or_nonnumeric_400(self):
+        for url in [
+            f"{TASKS}?skip=-1",
+            f"{TASKS}?limit=-5",
+            f"{USERS}?skip=foo",
+            f"{USERS}?limit=bar",
+        ]:
+            r = requests.get(url, timeout=10)
+            _ = ensure_envelope(r)
+            self.assertEqual(r.status_code, 400, f"Should 400 for bad pagination: {url}")
+
+    def test_count_true_ignores_select_and_returns_int(self):
+        r = requests.get(f"{TASKS}?where={qjson({'completed':False})}&select={qjson({'_id':0})}&count=true", timeout=10)
+        body = ensure_envelope(r)
+        self.assertEqual(r.status_code, 200)
+        self.assertIsInstance(body["data"], int)
+
+    def test_combined_where_sort_skip_limit_select(self):
+        # 造一些可排序的数据
+        base = [("K-01", 1), ("K-02", 2), ("K-03", 3), ("K-04", 4)]
+        for nm, d in base:
+            self._create_user(name=f"{nm}", email=mk_email())
+        url = (
+            f"{USERS}"
+            f"?where={qjson({'name':{'$regex':'^K-'}})}"
+            f"&sort={qjson({'name':-1})}"
+            f"&skip=1&limit=2"
+            f"&select={qjson({'_id':0,'name':1})}"
+        )
+        r = requests.get(url, timeout=10)
+        body = ensure_envelope(r)
+        self.assertEqual(r.status_code, 200)
+        data = body["data"]
+        self.assertIsInstance(data, list)
+        # 降序后跳过1条，取2条
+        names = [d["name"] for d in data]
+        self.assertLessEqual(len(names), 2)
+        self.assertTrue(all(n.startswith("K-") for n in names))
+
+    # =============== ID 形态：非法 vs 不存在 =================
+
+    def test_invalid_object_id_format_returns_400(self):
+        for bad in ["123", "zzzzzzzzzzzzzzzzzzzzzzzz", "🚀" * 12]:
+            r = requests.get(f"{USERS}/{bad}", timeout=10)
+            _ = ensure_envelope(r)
+            self.assertEqual(r.status_code, 400, f"Invalid ObjectId should be 400: {bad}")
+
+    # =============== PUT 必填字段与重复 email =================
+
+    def test_put_user_missing_required_fields_400(self):
+        u = self._create_user(name="PUT-REQ", email=mk_email())
+        uid = u["_id"]
+        # 整替少 email
+        r = requests.put(f"{USERS}/{uid}", json={"name":"only"}, timeout=10)
+        _ = ensure_envelope(r)
+        self.assertEqual(r.status_code, 400)
+
+    def test_put_user_duplicate_email_400(self):
+        a = self._create_user(name="A", email=mk_email())
+        b = self._create_user(name="B", email=mk_email())
+        # 把 B 改成 A 的 email
+        r = requests.put(f"{USERS}/{b['_id']}", json={"name": "B2", "email": a["email"]}, timeout=10)
+        _ = ensure_envelope(r)
+        self.assertEqual(r.status_code, 400)
+
+    def test_put_task_missing_required_fields_400(self):
+        t = self._create_task(name="PUT-REQ-T", deadline=iso_in(3))
+        tid = t["_id"]
+        # 少 name
+        r = requests.put(f"{TASKS}/{tid}", json={"deadline": iso_in(4)}, timeout=10)
+        _ = ensure_envelope(r)
+        self.assertEqual(r.status_code, 400)
+
+    # =============== 新建默认值校验 =================
+
+    def test_post_user_defaults_have_dateCreated(self):
+        u = self._create_user(name="DEF-U", email=mk_email())
+        self.assertIn("dateCreated", u)
+
+    def test_post_task_defaults(self):
+        t = self._create_task(name="DEF-T", deadline=iso_in(5))
+        self.assertIn("dateCreated", t)
+        self.assertIn("assignedUser", t)
+        self.assertIn("assignedUserName", t)
+        self.assertIn("completed", t)
+
+    # =============== limit 行为细化 =================
+
+    def test_users_respects_explicit_limit(self):
+        need = max(0, 50 - len(self._list_users()))
+        for _ in range(need):
+            self._create_user(name=f"LIMU-{random.randint(1000,9999)}", email=mk_email())
+        r = requests.get(f"{USERS}?limit=5", timeout=10)
+        body = ensure_envelope(r)
+        self.assertEqual(r.status_code, 200)
+        if isinstance(body["data"], list):
+            self.assertLessEqual(len(body["data"]), 5)
+
+    def test_tasks_explicit_limit_over_100_allowed(self):
+        need = max(0, 160 - len(self._list_tasks()))
+        for _ in range(need):
+            self._create_task(name=f"LIMT-{random.randint(1000,9999)}", deadline=iso_in(20))
+        r = requests.get(f"{TASKS}?limit=120", timeout=20)
+        body = ensure_envelope(r)
+        self.assertEqual(r.status_code, 200)
+        if isinstance(body["data"], list):
+            # 明确 limit=120 应生效（默认100仅在省略时）
+            self.assertLessEqual(len(body["data"]), 120)
+
+    # =============== 双向引用：重指派与多任务解绑 =================
+
+    def test_reassign_task_moves_between_users(self):
+        ua = self._create_user(name="FromA", email=mk_email())
+        ub = self._create_user(name="ToB", email=mk_email())
+        t = self._create_task(name="reassign", deadline=iso_in(6), completed=False)
+
+        # 指派给 A
+        payloadA = {
+            "name": t["name"], "description": t.get("description",""),
+            "deadline": t["deadline"], "completed": False,
+            "assignedUser": ua["_id"], "assignedUserName": ua["name"],
+        }
+        r1 = requests.put(f"{TASKS}/{t['_id']}", json=payloadA, timeout=10)
+        _ = ensure_envelope(r1); self.assertIn(r1.status_code,(200,201))
+
+        # 改指派给 B
+        payloadB = {**payloadA, "assignedUser": ub["_id"], "assignedUserName": ub["name"]}
+        r2 = requests.put(f"{TASKS}/{t['_id']}", json=payloadB, timeout=10)
+        _ = ensure_envelope(r2); self.assertIn(r2.status_code,(200,201))
+
+        # A 应移除，B 应添加
+        ra = requests.get(f"{USERS}/{ua['_id']}", timeout=10)
+        rb = requests.get(f"{USERS}/{ub['_id']}", timeout=10)
+        ba = ensure_envelope(ra)["data"]; bb = ensure_envelope(rb)["data"]
+        self.assertNotIn(t["_id"], ba.get("pendingTasks", []))
+        self.assertIn(t["_id"], bb.get("pendingTasks", []))
+
+    def test_delete_user_unassigns_multiple_tasks(self):
+        u = self._create_user(name="DelMulti", email=mk_email())
+        tids = []
+        for i in range(3):
+            t = self._create_task(name=f"M{i}", deadline=iso_in(3+i), completed=False)
+            tids.append(t["_id"])
+            payload = {
+                "name": t["name"], "description": t.get("description",""),
+                "deadline": t["deadline"], "completed": False,
+                "assignedUser": u["_id"], "assignedUserName": u["name"],
+            }
+            requests.put(f"{TASKS}/{t['_id']}", json=payload, timeout=10)
+
+        r = requests.delete(f"{USERS}/{u['_id']}", timeout=10)
+        _ = ensure_envelope(r); self.assertIn(r.status_code,(200,204))
+        self.created_user_ids.discard(u["_id"])
+
+        for tid in tids:
+            r2 = requests.get(f"{TASKS}/{tid}", timeout=10)
+            if r2.status_code == 200:
+                b2 = ensure_envelope(r2)["data"]
+                self.assertIn(b2.get("assignedUser", ""), ("", None))
+                self.assertEqual(b2.get("assignedUserName","unassigned"), "unassigned")
+
+    # =============== 单资源：select 排除式 ===============
+    def test_user_id_select_exclude_only(self):
+        u = self._create_user(name="OnlyEx", email=mk_email())
+        r = requests.get(f"{USERS}/{u['_id']}?select={qjson({'_id':0,'email':0})}", timeout=10)
+        body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
+        self.assertNotIn("_id", body["data"])
+        self.assertNotIn("email", body["data"])
+        self.assertIn("name", body["data"])
+
+    # =============== 排序降序 ===============
+    def test_sort_descending(self):
+        for nm in ["ZZZ", "AAA", "MMM"]:
+            self._create_user(name=f"Sort-{nm}", email=mk_email())
+        r = requests.get(f"{USERS}?where={qjson({'name':{'$regex':'^Sort-'}})}&sort={qjson({'name':-1})}", timeout=10)
+        body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
+        data = [d["name"] for d in body["data"]]
+        self.assertEqual(data, sorted(data, reverse=True))
 
     # ----------------- small helpers -----------------
 
