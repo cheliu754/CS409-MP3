@@ -16,10 +16,10 @@ const badRequest = (res, message = "Bad Request", data = null) => json(res, 400,
 const notFound = (res, message = "Not Found") => json(res, 404, null, message);
 
 //  helpers: ids
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id); // 仅用于“请求体”校验
 const toIdStr = (v) => (v ? String(v) : "");
 
-//  helpers: select
+//  helpers: select & query parsing
 function parseJsonParam(name, raw, fallback) {
   if (raw === undefined) return fallback;
   try {
@@ -41,7 +41,6 @@ function sanitizeSelect(sel) {
 
   if (isInc && isExc) {
     // MongoDB 规则：包含与排除不能混用（_id 除外）
-    // 若除 _id 外仍混用，报 400
     const { _id, ...rest } = sel;
     const restHasExc = Object.values(rest).some((v) => v === 0 || v === false);
     if (restHasExc) {
@@ -52,6 +51,12 @@ function sanitizeSelect(sel) {
   }
   return sel;
 }
+
+const bad400 = (msg) => {
+  const e = new Error(msg);
+  e.statusCode = 400;
+  return e;
+};
 
 function parsePagination(req, { defaultLimit = null } = {}) {
   const skipRaw = req.query.skip;
@@ -72,12 +77,6 @@ function parsePagination(req, { defaultLimit = null } = {}) {
   return { skip, limit };
 }
 
-const bad400 = (msg) => {
-  const e = new Error(msg);
-  e.statusCode = 400;
-  return e;
-};
-
 //  helpers: GET query build
 function buildFindQuery(req) {
   const where = parseJsonParam("where", req.query.where, {});
@@ -94,19 +93,11 @@ function buildSelect(req) {
 }
 
 /*  helpers: two-way reference maintenance - */
-/**
- * 强一致同步：根据 before/after 的差异，维护 User.pendingTasks
- * 规则：
- *  - 若指派用户变化：从旧用户 pendingTasks 移除、向新用户添加（仅当 next.completed === false）
- *  - 若从未完成 -> 完成：从（新）用户 pendingTasks 移除；保留 assignedUser/Name
- *  - 不允许从完成 -> 未完成（外层 PUT 已拦截）
- */
 async function syncUserPendingStrict(before, after) {
   const prevUser = toIdStr(before?.assignedUser);
   const nextUser = toIdStr(after?.assignedUser);
   const nextCompleted = !!after?.completed;
 
-  // 指派变更：先从旧用户移除
   if (prevUser && prevUser !== nextUser) {
     await User.updateOne(
       { _id: prevUser },
@@ -114,7 +105,6 @@ async function syncUserPendingStrict(before, after) {
     );
   }
 
-  // 对新用户：未完成则加入，已完成则确保移除
   if (nextUser) {
     if (nextCompleted) {
       await User.updateOne(
@@ -132,11 +122,7 @@ async function syncUserPendingStrict(before, after) {
 
 //  ROUTES
 
-/**
- * GET /api/tasks
- * 支持 where/sort/select/skip/limit/count
- * 默认 limit=100；count=true 时返回整数且忽略 select
- */
+// GET /api/tasks
 router.get("/", async (req, res, next) => {
   try {
     const where = buildFindQuery(req);
@@ -167,15 +153,7 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-/**
- * POST /api/tasks
- * - name, deadline 必填
- * - 若提供 assignedUser：
- *   * 必须存在
- *   * 若也提供了 assignedUserName，必须与真实 user.name 一致；否则 400
- *   * 统一回填为真实 user.name
- * - 创建后维护 pendingTasks（未完成则加入）
- */
+// POST /api/tasks
 router.post("/", async (req, res, next) => {
   try {
     const { name, deadline } = req.body || {};
@@ -185,6 +163,7 @@ router.post("/", async (req, res, next) => {
     let assignedUserName = "unassigned";
 
     if (assignedUser) {
+      // 请求体字段 → 400
       if (!isValidObjectId(assignedUser)) return badRequest(res, "invalid assignedUser id format");
       const u = await User.findById(assignedUser).lean();
       if (!u) return badRequest(res, "assignedUser does not exist");
@@ -213,46 +192,29 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-/**
- * GET /api/tasks/:id
- * - 仅支持 select
- */
+// GET /api/tasks/:id  —— 路径 id：非法格式或不存在都 404
 router.get("/:id", async (req, res, next) => {
   try {
-    const { id } = req.params;
-    if (!isValidObjectId(id)) return badRequest(res, "invalid id format");
-
     const select = buildSelect(req);
-    const q = Task.findById(id);
+    const q = Task.findById(req.params.id);
     if (select) q.select(select);
     const t = await q.lean();
     if (!t) return notFound(res, "task not found");
     return ok(res, t);
   } catch (e) {
+    if (e?.name === "CastError") return notFound(res, "task not found");
     if (e?.statusCode === 400) return badRequest(res, e.message);
     next(e);
   }
 });
 
-/**
- * PUT /api/tasks/:id
- * - 完全替换（需要 name, deadline）
- * - 不允许更新“已完成”的任务（before.completed===true → 400）
- * - 若指定 assignedUser：
- *   * 必须存在
- *   * 若也给了 assignedUserName，必须与真实 user.name 一致；否则 400
- *   * 统一写为真实 user.name
- * - 同步维护用户 pendingTasks
- */
+// PUT /api/tasks/:id —— 路径 id 非法/不存在 → 404；请求体错误 → 400
 router.put("/:id", async (req, res, next) => {
   try {
-    const { id } = req.params;
-    if (!isValidObjectId(id)) return badRequest(res, "invalid id format");
-
     const { name, deadline } = req.body || {};
     if (!name || !deadline) return badRequest(res, "name and deadline are required");
 
-    const task = await Task.findById(id);
+    const task = await Task.findById(req.params.id);
     if (!task) return notFound(res, "task not found");
     const before = task.toObject();
 
@@ -264,6 +226,7 @@ router.put("/:id", async (req, res, next) => {
     let assignedUserName = "unassigned";
 
     if (assignedUser) {
+      // 请求体字段 → 400
       if (!isValidObjectId(assignedUser)) return badRequest(res, "invalid assignedUser id format");
       const u = await User.findById(assignedUser).lean();
       if (!u) return badRequest(res, "assignedUser does not exist");
@@ -288,36 +251,31 @@ router.put("/:id", async (req, res, next) => {
     await syncUserPendingStrict(before, task.toObject());
     return ok(res, task.toObject(), "Updated");
   } catch (e) {
+    if (e?.name === "CastError") return notFound(res, "task not found");
     if (e?.statusCode === 400) return badRequest(res, e.message);
     next(e);
   }
 });
 
-/**
- * DELETE /api/tasks/:id
- * - 从其 assignedUser 的 pendingTasks 中移除
- */
+// DELETE /api/tasks/:id —— 路径 id 非法/不存在 → 404
 router.delete("/:id", async (req, res, next) => {
   try {
-    const { id } = req.params;
-    if (!isValidObjectId(id)) return badRequest(res, "invalid id format");
-
-    const t = await Task.findById(id);
+    const t = await Task.findById(req.params.id);
     if (!t) return notFound(res, "task not found");
 
     const before = t.toObject();
-    await Task.deleteOne({ _id: id });
+    await Task.deleteOne({ _id: t._id });
 
-    // 清理用户 pendingTasks
     if (before.assignedUser) {
       await User.updateOne(
         { _id: String(before.assignedUser) },
-        { $pull: { pendingTasks: String(id) } }
+        { $pull: { pendingTasks: String(before._id) } }
       );
     }
 
-    return ok(res, { _id: String(id) }, "Deleted");
+    return ok(res, { _id: String(before._id) }, "Deleted");
   } catch (e) {
+    if (e?.name === "CastError") return notFound(res, "task not found");
     if (e?.statusCode === 400) return badRequest(res, e.message);
     next(e);
   }

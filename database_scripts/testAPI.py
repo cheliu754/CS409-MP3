@@ -428,7 +428,7 @@ class APITestCase(unittest.TestCase):
         if isinstance(data, list):
             self.assertGreaterEqual(len(data), 101, "Users endpoint should not default-limit to 100")
 
-    # ======== 你已有的 corner（保留） ========
+    # ======== corner：保留 ========
     def test_put_user_cannot_add_completed_task(self):
         u = self._create_user(name="CantAddDone", email=mk_email())
         t_done = self._create_task(name="done", deadline=iso_in(1), completed=True)
@@ -513,7 +513,6 @@ class APITestCase(unittest.TestCase):
             self.assertEqual(r.status_code, 400, f"Should 400 for invalid JSON: {url}")
 
     def test_select_mixing_include_and_exclude_400(self):
-        # 除 _id 特例外，混用应 400（如果你的实现是“自动修正”，把这里放宽为 in (200,400)）
         r = requests.get(f"{USERS}?select={qjson({'name':1,'email':0})}", timeout=10)
         _ = ensure_envelope(r)
         self.assertEqual(r.status_code, 400)
@@ -536,7 +535,6 @@ class APITestCase(unittest.TestCase):
         self.assertIsInstance(body["data"], int)
 
     def test_combined_where_sort_skip_limit_select(self):
-        # 造一些可排序的数据
         base = [("K-01", 1), ("K-02", 2), ("K-03", 3), ("K-04", 4)]
         for nm, d in base:
             self._create_user(name=f"{nm}", email=mk_email())
@@ -552,25 +550,29 @@ class APITestCase(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         data = body["data"]
         self.assertIsInstance(data, list)
-        # 降序后跳过1条，取2条
         names = [d["name"] for d in data]
         self.assertLessEqual(len(names), 2)
         self.assertTrue(all(n.startswith("K-") for n in names))
 
-    # =============== ID 形态：非法 vs 不存在 =================
+    # =============== ID 形态：非法 vs 不存在（路径参数一律 404） =================
 
-    def test_invalid_object_id_format_returns_400(self):
+    def test_invalid_object_id_format_returns_404(self):
         for bad in ["123", "zzzzzzzzzzzzzzzzzzzzzzzz", "🚀" * 12]:
             r = requests.get(f"{USERS}/{bad}", timeout=10)
             _ = ensure_envelope(r)
-            self.assertEqual(r.status_code, 400, f"Invalid ObjectId should be 400: {bad}")
+            self.assertEqual(r.status_code, 404, f"Invalid ObjectId should be 404: {bad}")
+
+    def test_invalid_task_object_id_returns_404(self):
+        for bad in ["abc", "fffffffffffffffffffffffff", "not-an-id"]:
+            r = requests.get(f"{TASKS}/{bad}", timeout=10)
+            _ = ensure_envelope(r)
+            self.assertEqual(r.status_code, 404, f"Invalid Task ObjectId should be 404: {bad}")
 
     # =============== PUT 必填字段与重复 email =================
 
     def test_put_user_missing_required_fields_400(self):
         u = self._create_user(name="PUT-REQ", email=mk_email())
         uid = u["_id"]
-        # 整替少 email
         r = requests.put(f"{USERS}/{uid}", json={"name":"only"}, timeout=10)
         _ = ensure_envelope(r)
         self.assertEqual(r.status_code, 400)
@@ -578,7 +580,6 @@ class APITestCase(unittest.TestCase):
     def test_put_user_duplicate_email_400(self):
         a = self._create_user(name="A", email=mk_email())
         b = self._create_user(name="B", email=mk_email())
-        # 把 B 改成 A 的 email
         r = requests.put(f"{USERS}/{b['_id']}", json={"name": "B2", "email": a["email"]}, timeout=10)
         _ = ensure_envelope(r)
         self.assertEqual(r.status_code, 400)
@@ -586,7 +587,6 @@ class APITestCase(unittest.TestCase):
     def test_put_task_missing_required_fields_400(self):
         t = self._create_task(name="PUT-REQ-T", deadline=iso_in(3))
         tid = t["_id"]
-        # 少 name
         r = requests.put(f"{TASKS}/{tid}", json={"deadline": iso_in(4)}, timeout=10)
         _ = ensure_envelope(r)
         self.assertEqual(r.status_code, 400)
@@ -624,7 +624,6 @@ class APITestCase(unittest.TestCase):
         body = ensure_envelope(r)
         self.assertEqual(r.status_code, 200)
         if isinstance(body["data"], list):
-            # 明确 limit=120 应生效（默认100仅在省略时）
             self.assertLessEqual(len(body["data"]), 120)
 
     # =============== 双向引用：重指派与多任务解绑 =================
@@ -634,7 +633,6 @@ class APITestCase(unittest.TestCase):
         ub = self._create_user(name="ToB", email=mk_email())
         t = self._create_task(name="reassign", deadline=iso_in(6), completed=False)
 
-        # 指派给 A
         payloadA = {
             "name": t["name"], "description": t.get("description",""),
             "deadline": t["deadline"], "completed": False,
@@ -643,12 +641,10 @@ class APITestCase(unittest.TestCase):
         r1 = requests.put(f"{TASKS}/{t['_id']}", json=payloadA, timeout=10)
         _ = ensure_envelope(r1); self.assertIn(r1.status_code,(200,201))
 
-        # 改指派给 B
         payloadB = {**payloadA, "assignedUser": ub["_id"], "assignedUserName": ub["name"]}
         r2 = requests.put(f"{TASKS}/{t['_id']}", json=payloadB, timeout=10)
         _ = ensure_envelope(r2); self.assertIn(r2.status_code,(200,201))
 
-        # A 应移除，B 应添加
         ra = requests.get(f"{USERS}/{ua['_id']}", timeout=10)
         rb = requests.get(f"{USERS}/{ub['_id']}", timeout=10)
         ba = ensure_envelope(ra)["data"]; bb = ensure_envelope(rb)["data"]
@@ -703,7 +699,6 @@ class APITestCase(unittest.TestCase):
         u = self._create_user(name="CompleteKeepAssign", email=mk_email())
         t = self._create_task(name="Cmpl", deadline=iso_in(3), completed=False,
                               assignedUser=u["_id"], assignedUserName=u["name"])
-        # 标记完成
         payload_done = {
             "name": t["name"],
             "description": t.get("description",""),
@@ -715,10 +710,8 @@ class APITestCase(unittest.TestCase):
         r = requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10)
         b = ensure_envelope(r); self.assertIn(r.status_code,(200,201))
         self.assertTrue(b["data"]["completed"])
-        # 任务仍保留 assignment
         self.assertEqual(b["data"]["assignedUser"], u["_id"])
         self.assertEqual(b["data"]["assignedUserName"], u["name"])
-        # 用户 pendingTasks 中应移除
         ru = requests.get(f"{USERS}/{u['_id']}", timeout=10)
         bu = ensure_envelope(ru)["data"]
         self.assertNotIn(t["_id"], bu.get("pendingTasks", []))
@@ -728,14 +721,12 @@ class APITestCase(unittest.TestCase):
         u2 = self._create_user(name="DoneTo", email=mk_email())
         t = self._create_task(name="DoneReassign", deadline=iso_in(4), completed=False,
                               assignedUser=u1["_id"], assignedUserName=u1["name"])
-        # 先完成
         payload_done = {
             "name": t["name"], "description": t.get("description",""),
             "deadline": t["deadline"], "completed": True,
             "assignedUser": u1["_id"], "assignedUserName": u1["name"],
         }
         _ = ensure_envelope(requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10))
-        # 再尝试改指派给 u2，应 400
         payload_reassign = {**payload_done, "assignedUser": u2["_id"], "assignedUserName": u2["name"]}
         r = requests.put(f"{TASKS}/{t['_id']}", json=payload_reassign, timeout=10)
         _ = ensure_envelope(r); self.assertEqual(r.status_code, 400)
@@ -744,14 +735,12 @@ class APITestCase(unittest.TestCase):
         u = self._create_user(name="NoReopen", email=mk_email())
         t = self._create_task(name="Closed", deadline=iso_in(2), completed=False,
                               assignedUser=u["_id"], assignedUserName=u["name"])
-        # 完成任务
         payload_done = {
             "name": t["name"], "description": t.get("description",""),
             "deadline": t["deadline"], "completed": True,
             "assignedUser": u["_id"], "assignedUserName": u["name"],
         }
         _ = ensure_envelope(requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10))
-        # 尝试通过 PUT /users/:id 把它加回 pendingTasks（应 400）
         new_user = {"name": u["name"], "email": u["email"], "pendingTasks": [t["_id"]]}
         r2 = requests.put(f"{USERS}/{u['_id']}", json=new_user, timeout=10)
         _ = ensure_envelope(r2); self.assertEqual(r2.status_code, 400)
@@ -761,7 +750,6 @@ class APITestCase(unittest.TestCase):
     def test_post_task_with_only_assignedUser_autofills_assignedUserName(self):
         u = self._create_user(name="AutoFillGuy", email=mk_email())
         t = self._create_task(name="AutoFill", deadline=iso_in(5), assignedUser=u["_id"])
-        # 服务端应自动把 assignedUserName = u.name；completed 默认为 False
         self.assertEqual(t.get("assignedUserName"), u["name"])
         self.assertEqual(t.get("assignedUser"), u["_id"])
 
@@ -781,11 +769,9 @@ class APITestCase(unittest.TestCase):
                                assignedUser=u["_id"], assignedUserName=u["name"])
         t2 = self._create_task(name="Prop2", deadline=iso_in(3), completed=False,
                                assignedUser=u["_id"], assignedUserName=u["name"])
-        # 改名
         new_name = "NewNameSynced"
         r = requests.put(f"{USERS}/{u['_id']}", json={"name": new_name, "email": u["email"]}, timeout=10)
         _ = ensure_envelope(r); self.assertIn(r.status_code, (200,201))
-        # 任务的 assignedUserName 应被同步
         for tid in (t1["_id"], t2["_id"]):
             rt = requests.get(f"{TASKS}/{tid}", timeout=10)
             bt = ensure_envelope(rt)["data"]
@@ -795,12 +781,10 @@ class APITestCase(unittest.TestCase):
 
     def test_id_endpoint_only_select_param(self):
         u = self._create_user(name="OnlySelect", email=mk_email())
-        # 传入无关 where/limit 等：允许两种行为（返回 400 或忽略返回 200）
         r = requests.get(f"{USERS}/{u['_id']}?where={qjson({'name':'x'})}&limit=1", timeout=10)
         _ = ensure_envelope(r)
         self.assertIn(r.status_code, (200, 400))
 
-        # 合法 select 应 200
         r2 = requests.get(f"{USERS}/{u['_id']}?select={qjson({'_id':0,'email':0})}", timeout=10)
         b2 = ensure_envelope(r2); self.assertEqual(r2.status_code, 200)
         self.assertNotIn("_id", b2["data"]); self.assertNotIn("email", b2["data"])
@@ -808,7 +792,6 @@ class APITestCase(unittest.TestCase):
     # ============== 排序大小写：接受大小写不敏感或 Mongo 默认任一 ==============
 
     def test_sort_case_sensitivity_permissive(self):
-        # 造大小写混合的名字
         vals = ["alpha", "Bravo", "charlie", "Delta", "echo", "Foxtrot"]
         for v in vals:
             self._create_user(name=f"Case-{v}", email=mk_email())
@@ -818,21 +801,17 @@ class APITestCase(unittest.TestCase):
         )
         body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
         got = [d["name"] for d in body["data"]]
-        # 只取后缀部分比较
         suffixes = [s.split("Case-")[1] for s in got]
-        # 两种合法序：不区分大小写排序 or Python/Mongo 默认（区分大小写，通常大写排前）
         ci_sorted = sorted(vals, key=lambda x: x.lower())
-        cs_sorted = sorted(vals)  # 代码点顺序，通常大写先于小写
+        cs_sorted = sorted(vals)
         self.assertIn(suffixes, [ci_sorted, cs_sorted])
 
-    # ============== 复杂组合：构造稳定排序 + 确定性分页切片校验 ==============
+    # ============== 复杂组合：稳定排序 + 确定性分页切片 ==============
 
     def test_stable_sorted_pagination_exact_slice(self):
-        # 用确定性 name 序列 + 显式 sort
         base = [f"Slice-{i:03d}" for i in range(0, 90)]
         for nm in base:
             self._create_user(name=nm, email=mk_email())
-        # 按 name 升序，skip=60,limit=20 → 预期 Slice-060..Slice-079
         r = requests.get(
             f"{USERS}?where={qjson({'name':{'$regex':'^Slice-'}})}"
             f"&sort={qjson({'name':1})}&skip=60&limit=20"
@@ -842,7 +821,6 @@ class APITestCase(unittest.TestCase):
         body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
         got = [d["name"] for d in body["data"]]
         expected = [f"Slice-{i:03d}" for i in range(60, 80)]
-        # 至少应是 expected 的前缀（允许库把历史数据插缀，但顺序和切片应稳定）
         self.assertEqual(got, expected)
 
     # ============== 更严密：未完成任务允许换指派，并双向更新 ==============
@@ -852,7 +830,6 @@ class APITestCase(unittest.TestCase):
         u2 = self._create_user(name="SwapB", email=mk_email())
         t = self._create_task(name="SwapTask", deadline=iso_in(4), completed=False,
                               assignedUser=u1["_id"], assignedUserName=u1["name"])
-        # 换指派给 u2
         payload = {
             "name": t["name"], "description": t.get("description",""),
             "deadline": t["deadline"], "completed": False,
@@ -860,14 +837,12 @@ class APITestCase(unittest.TestCase):
         }
         r = requests.put(f"{TASKS}/{t['_id']}", json=payload, timeout=10)
         _ = ensure_envelope(r); self.assertIn(r.status_code,(200,201))
-        # 校验双向维护
         ru1 = ensure_envelope(requests.get(f"{USERS}/{u1['_id']}", timeout=10))["data"]
         ru2 = ensure_envelope(requests.get(f"{USERS}/{u2['_id']}", timeout=10))["data"]
         self.assertNotIn(t["_id"], ru1.get("pendingTasks", []))
         self.assertIn(t["_id"], ru2.get("pendingTasks", []))
     
     def test_put_user_pendingTasks_replace_semantics_add_and_remove(self):
-        # 初始：u 拥有 t_keep 与 t_drop 两个任务；另有 t_add 未指派
         u = self._create_user(name="ReplacePT", email=mk_email())
         t_keep = self._create_task(name="Keep", deadline=iso_in(3), completed=False,
                                    assignedUser=u["_id"], assignedUserName=u["name"])
@@ -876,24 +851,19 @@ class APITestCase(unittest.TestCase):
         t_add  = self._create_task(name="Add",  deadline=iso_in(5), completed=False,
                                    assignedUser="", assignedUserName="unassigned")
 
-        # PUT /users 进行“全量替换”：pendingTasks 只保留 t_keep，并新增 t_add（移除 t_drop）
         new_user = {"name": u["name"], "email": u["email"],
                     "pendingTasks": [t_keep["_id"], t_add["_id"]]}
         r = requests.put(f"{USERS}/{u['_id']}", json=new_user, timeout=10)
         b = ensure_envelope(r); self.assertIn(r.status_code, (200, 201))
         self.assertCountEqual(b["data"].get("pendingTasks", []), [t_keep["_id"], t_add["_id"]])
 
-        # 校验三个任务的指派状态被正确同步
-        # t_keep 仍指派给 u
         bk = ensure_envelope(requests.get(f"{TASKS}/{t_keep['_id']}", timeout=10))["data"]
         self.assertEqual(bk.get("assignedUser"), u["_id"])
 
-        # t_add 新指派给 u
         ba = ensure_envelope(requests.get(f"{TASKS}/{t_add['_id']}", timeout=10))["data"]
         self.assertEqual(ba.get("assignedUser"), u["_id"])
         self.assertEqual(ba.get("assignedUserName"), u["name"])
 
-        # t_drop 被解绑（assignedUser 清空，assignedUserName=unassigned）
         bd = ensure_envelope(requests.get(f"{TASKS}/{t_drop['_id']}", timeout=10))["data"]
         self.assertIn(bd.get("assignedUser", ""), ("", None))
         self.assertEqual(bd.get("assignedUserName", "unassigned"), "unassigned")
@@ -910,27 +880,25 @@ class APITestCase(unittest.TestCase):
             assignedUserName=ua["name"],
         )
 
-        # 全量替换：改名、改描述、改截止时间、改指派到 ub，completed 仍 False
         payload = {
             "name": "FullReplaceV2",
             "description": "new-desc",
             "deadline": iso_in(10),
             "completed": False,
             "assignedUser": ub["_id"],
-            "assignedUserName": ub["name"],  # 必须匹配用户真实 name
+            "assignedUserName": ub["name"],
         }
         r = requests.put(f"{TASKS}/{t0['_id']}", json=payload, timeout=10)
         b = ensure_envelope(r); self.assertIn(r.status_code, (200, 201))
         self.assertEqual(b["data"]["name"], "FullReplaceV2")
         self.assertEqual(b["data"]["description"], "new-desc")
 
-        # 双向更新：从 ua 移除、向 ub 添加
         bua = ensure_envelope(requests.get(f"{USERS}/{ua['_id']}", timeout=10))["data"]
         bub = ensure_envelope(requests.get(f"{USERS}/{ub['_id']}", timeout=10))["data"]
         self.assertNotIn(t0["_id"], bua.get("pendingTasks", []))
         self.assertIn(t0["_id"], bub.get("pendingTasks", []))
 
-        # 进一步验证：不允许通过“省略字段”来保留旧值（这里我们再做一次 PUT，故意漏掉 description）
+        # 若你实现“全量替换必须提供所有字段”，可在此断言 400；否则留空通过。
         payload_missing_desc = {
             "name": "FullReplaceV3",
             "deadline": iso_in(11),
@@ -940,7 +908,7 @@ class APITestCase(unittest.TestCase):
         }
         r2 = requests.put(f"{TASKS}/{t0['_id']}", json=payload_missing_desc, timeout=10)
         _ = ensure_envelope(r2)
-        # # 依据“全量替换”要求：缺少必填/约定字段应 400（如果你的实现允许缺省可改成接受 200 并断言默认值）
+        # 可选：如果要求严格 PUT 全量替换，取消注释下一行
         # self.assertEqual(r2.status_code, 400)
     
     # ----------------- small helpers -----------------
