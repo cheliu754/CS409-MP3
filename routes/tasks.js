@@ -6,7 +6,7 @@ import User from "../models/user.js";
 
 const router = express.Router();
 
-/* -------------------------- helpers: responses -------------------------- */
+//  helpers: responses
 const json = (res, code, data = null, message = "OK") =>
   res.status(code).json({ message, data });
 
@@ -15,11 +15,11 @@ const created = (res, data, message = "Created") => json(res, 201, data, message
 const badRequest = (res, message = "Bad Request", data = null) => json(res, 400, data, message);
 const notFound = (res, message = "Not Found") => json(res, 404, null, message);
 
-/* ------------------------------ helpers: ids ---------------------------- */
+//  helpers: ids
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 const toIdStr = (v) => (v ? String(v) : "");
 
-/* ---------------------------- helpers: select --------------------------- */
+//  helpers: select
 function parseJsonParam(name, raw, fallback) {
   if (raw === undefined) return fallback;
   try {
@@ -78,7 +78,7 @@ const bad400 = (msg) => {
   return e;
 };
 
-/* ------------------------ helpers: GET query build ---------------------- */
+//  helpers: GET query build
 function buildFindQuery(req) {
   const where = parseJsonParam("where", req.query.where, {});
   return where || {};
@@ -93,7 +93,7 @@ function buildSelect(req) {
   return sanitizeSelect(sel);
 }
 
-/* ----------------- helpers: two-way reference maintenance --------------- */
+/*  helpers: two-way reference maintenance - */
 /**
  * 强一致同步：根据 before/after 的差异，维护 User.pendingTasks
  * 规则：
@@ -130,7 +130,7 @@ async function syncUserPendingStrict(before, after) {
   }
 }
 
-/* =============================== ROUTES ================================= */
+//  ROUTES
 
 /**
  * GET /api/tasks

@@ -1,14 +1,14 @@
 // routes/_shared.js
 import mongoose from "mongoose";
 
-/* ---------- Response helpers ---------- */
+//  Response helpers
 export const ok = (res, data, msg = "OK") => res.status(200).json({ message: msg, data });
 export const created = (res, data, msg = "Created") => res.status(201).json({ message: msg, data });
 export const noContent = (res) => res.status(204).send();
 export const badRequest = (res, msg) => res.status(400).json({ message: msg, data: {} });
 export const notFound = (res, msg) => res.status(404).json({ message: msg, data: {} });
 
-/* ---------- ID / params ---------- */
+//  ID / params
 export const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 export function toIdStr(val) {
@@ -32,7 +32,7 @@ export function toIdStrArray(v) {
   return out;
 }
 
-/* ---------- Query helpers ---------- */
+//  Query helpers
 export function parseJsonParam(name, raw, fallback) {
   if (raw === undefined) return fallback;
   try {

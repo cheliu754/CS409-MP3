@@ -6,7 +6,7 @@ import Task from "../models/task.js";
 
 const router = express.Router();
 
-/* -------------------------- helpers: responses -------------------------- */
+/*  helpers: responses  */
 const json = (res, code, data = null, message = "OK") =>
   res.status(code).json({ message, data });
 
@@ -15,12 +15,12 @@ const created = (res, data, message = "Created") => json(res, 201, data, message
 const badRequest = (res, message = "Bad Request", data = null) => json(res, 400, data, message);
 const notFound = (res, message = "Not Found") => json(res, 404, null, message);
 
-/* ------------------------------ helpers: ids ---------------------------- */
+//  helpers: ids
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 const toIdStr = (v) => (v ? String(v) : "");
 const toIdStrArray = (arr) => (Array.isArray(arr) ? arr.map((x) => String(x)) : []);
 
-/* ---------------------------- helpers: select --------------------------- */
+//  helpers: select
 function parseJsonParam(name, raw, fallback) {
   if (raw === undefined) return fallback;
   try {
@@ -77,7 +77,7 @@ const bad400 = (msg) => {
   return e;
 };
 
-/* ------------------------ helpers: GET query build ---------------------- */
+//  helpers: GET query build
 function buildFindQuery(req) {
   const where = parseJsonParam("where", req.query.where, {});
   return where || {};
@@ -92,7 +92,7 @@ function buildSelect(req) {
   return sanitizeSelect(sel);
 }
 
-/* =============================== ROUTES ================================= */
+// ROUTES
 
 /**
  * GET /api/users
