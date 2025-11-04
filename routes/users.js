@@ -6,21 +6,26 @@ import Task from "../models/task.js";
 
 const router = express.Router();
 
-/*  helpers: responses  */
+/* ---------- helpers: responses ---------- */
 const json = (res, code, data = null, message = "OK") =>
   res.status(code).json({ message, data });
 
 const ok = (res, data, message = "OK") => json(res, 200, data, message);
 const created = (res, data, message = "Created") => json(res, 201, data, message);
-const badRequest = (res, message = "Bad Request", data = null) => json(res, 400, data, message);
+const badRequest = (res, message = "Bad Request", data = null) =>
+  json(res, 400, data, message);
 const notFound = (res, message = "Not Found") => json(res, 404, null, message);
 
-//  helpers: ids
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id); // 仅用于“请求体”校验
+/* ---------- helpers ---------- */
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id); // 仅用于“请求体”字段
 const toIdStr = (v) => (v ? String(v) : "");
 const toIdStrArray = (arr) => (Array.isArray(arr) ? arr.map((x) => String(x)) : []);
+const bad400 = (msg) => {
+  const e = new Error(msg);
+  e.statusCode = 400;
+  return e;
+};
 
-//  helpers: select & query parsing
 function parseJsonParam(name, raw, fallback) {
   if (raw === undefined) return fallback;
   try {
@@ -31,15 +36,12 @@ function parseJsonParam(name, raw, fallback) {
     throw err;
   }
 }
-
 function sanitizeSelect(sel) {
   if (!sel) return undefined;
   const entries = Object.entries(sel);
   if (entries.length === 0) return undefined;
-
   const isInc = entries.some(([, v]) => v === 1 || v === true);
   const isExc = entries.some(([, v]) => v === 0 || v === false);
-
   if (isInc && isExc) {
     const { _id, ...rest } = sel;
     const restHasExc = Object.values(rest).some((v) => v === 0 || v === false);
@@ -52,12 +54,6 @@ function sanitizeSelect(sel) {
   return sel;
 }
 
-const bad400 = (msg) => {
-  const e = new Error(msg);
-  e.statusCode = 400;
-  return e;
-};
-
 function parsePagination(req, { defaultLimit = null } = {}) {
   const skipRaw = req.query.skip;
   const limitRaw = req.query.limit;
@@ -68,7 +64,7 @@ function parsePagination(req, { defaultLimit = null } = {}) {
     skip = Number(skipRaw);
   }
 
-  let limit = defaultLimit; // users 默认不限制
+  let limit = defaultLimit; // users 默认无限制
   if (limitRaw !== undefined) {
     if (!/^\d+$/.test(String(limitRaw))) throw bad400("limit must be a non-negative integer");
     limit = Number(limitRaw);
@@ -77,24 +73,25 @@ function parsePagination(req, { defaultLimit = null } = {}) {
   return { skip, limit };
 }
 
-//  helpers: GET query build
 function buildFindQuery(req) {
   const where = parseJsonParam("where", req.query.where, {});
   return where || {};
 }
-
 function buildSort(req) {
   return parseJsonParam("sort", req.query.sort, undefined);
 }
-
 function buildSelect(req) {
   const sel = parseJsonParam("select", req.query.select, undefined);
   return sanitizeSelect(sel);
 }
 
-// ROUTES
+/* ---------- ROUTES ---------- */
 
-// GET /api/users
+/**
+ * GET /api/users
+ * 支持 where/sort/select/skip/limit/count
+ * 默认不限制 limit；count=true 返回整数且忽略 select
+ */
 router.get("/", async (req, res, next) => {
   try {
     const where = buildFindQuery(req);
@@ -121,11 +118,15 @@ router.get("/", async (req, res, next) => {
     return ok(res, data);
   } catch (e) {
     if (e?.statusCode === 400) return badRequest(res, e.message);
-    next(e);
+    return next(e);
   }
 });
 
-// POST /api/users
+/**
+ * POST /api/users
+ * - 必填：name, email
+ * - email 唯一（11000 捕获）
+ */
 router.post("/", async (req, res, next) => {
   try {
     const { name, email } = req.body || {};
@@ -142,12 +143,18 @@ router.post("/", async (req, res, next) => {
     return created(res, u.toObject());
   } catch (e) {
     if (e?.code === 11000) return badRequest(res, "email already exists");
+    if (e?.name === "ValidationError" || e?.name === "CastError")
+      return badRequest(res, "invalid field type or value");
     if (e?.statusCode === 400) return badRequest(res, e.message);
-    next(e);
+    return next(e);
   }
 });
 
-// GET /api/users/:id —— 路径 id：非法/不存在 → 404
+/**
+ * GET /api/users/:id
+ * - 路径 id 非法或不存在 → 404
+ * - 支持 select
+ */
 router.get("/:id", async (req, res, next) => {
   try {
     const select = buildSelect(req);
@@ -159,11 +166,19 @@ router.get("/:id", async (req, res, next) => {
   } catch (e) {
     if (e?.name === "CastError") return notFound(res, "user not found");
     if (e?.statusCode === 400) return badRequest(res, e.message);
-    next(e);
+    return next(e);
   }
 });
 
-// PUT /api/users/:id —— 路径 id：非法/不存在 → 404；请求体错误 → 400
+/**
+ * PUT /api/users/:id
+ * - 路径 id 非法/不存在 → 404
+ * - 必填：name + email
+ * - 若提供 pendingTasks：
+ *   * 不得包含已完成任务 → 400
+ *   * 差异同步：新增的任务指派到该用户；移除的任务解绑
+ * - 无论 pendingTasks 是否变化，若名字变更，需同步其所有任务的 assignedUserName
+ */
 router.put("/:id", async (req, res, next) => {
   try {
     const { name, email } = req.body || {};
@@ -177,10 +192,12 @@ router.put("/:id", async (req, res, next) => {
     const nowIds =
       req.body.pendingTasks !== undefined ? toIdStrArray(req.body.pendingTasks) : null;
 
-    // 校验：pendingTasks 不可包含已完成任务（请求体错误 → 400）
+    // 校验：pendingTasks 中不可包含已完成任务（语义错误 → 400）
     if (nowIds && nowIds.length) {
-      // 这里故意不校验 nowIds 的 ObjectId 格式（即使非法，也会进 CastError → 400? 不，这里是查询子句，不会抛出；如果你想更严，可逐个 isValidObjectId 做 400）
-      const doneIds = await Task.find({ _id: { $in: nowIds }, completed: true }).distinct("_id");
+      const doneIds = await Task.find({
+        _id: { $in: nowIds },
+        completed: true,
+      }).distinct("_id");
       if (doneIds.length) {
         return badRequest(
           res,
@@ -224,14 +241,19 @@ router.put("/:id", async (req, res, next) => {
 
     return ok(res, user.toObject(), "Updated");
   } catch (e) {
-    if (e?.name === "CastError") return notFound(res, "user not found");
+    if (e?.name === "CastError" || e?.name === "ValidationError")
+      return badRequest(res, "invalid field type or value");
     if (e?.code === 11000) return badRequest(res, "email already exists");
     if (e?.statusCode === 400) return badRequest(res, e.message);
-    next(e);
+    return next(e);
   }
 });
 
-// DELETE /api/users/:id —— 路径 id：非法/不存在 → 404
+/**
+ * DELETE /api/users/:id
+ * - 路径 id 非法/不存在 → 404
+ * - 将其所有任务设为未指派（assignedUser=""，assignedUserName="unassigned"）
+ */
 router.delete("/:id", async (req, res, next) => {
   try {
     const u = await User.findById(req.params.id);
@@ -247,7 +269,7 @@ router.delete("/:id", async (req, res, next) => {
   } catch (e) {
     if (e?.name === "CastError") return notFound(res, "user not found");
     if (e?.statusCode === 400) return badRequest(res, e.message);
-    next(e);
+    return next(e);
   }
 });
 

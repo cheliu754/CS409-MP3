@@ -352,7 +352,7 @@ class Tester:
             print("[OK] Completed task removed from pendingTasks (good)")
 
     def test_put_user_name_updates_assignedUserName_warn(self):
-        # 建一条分配给 u1 的 t8，然后改用户名字，检查任务的 assignedUserName 是否同步（仅警告）
+        # 先建一条分配给 u1 的 t8
         j = self.POST("/tasks", {
             "name": f"Task8 {self.tag}",
             "description": "d8",
@@ -364,11 +364,13 @@ class Tester:
         self.ids["t8"] = j["data"]["_id"]
 
         new_name = f"AliceRenamed {self.tag}"
+
+        # ✅ 改名时不传 pendingTasks，避免把任务清空导致无法同步
         self.PUT(f"/users/{self.ids['u1']}", {
             "name": new_name,
-            "email": self.u1["email"],
-            "pendingTasks": j["data"].get("pendingTasks", [])  # 不重要，这里只关心名字同步
+            "email": self.u1["email"]
         })
+
         # 检查任务名字是否同步
         jtask = self.GET(f"/tasks/{self.ids['t8']}")
         if jtask["data"]["assignedUserName"] != new_name:
@@ -402,6 +404,101 @@ class Tester:
         if r.status_code in (200, 201):
             raise AssertionError("Updating task with non-existent assignedUser should NOT return 200/201")
         print("[OK] Bad assignment inputs rejected (status not 200/201)")
+        
+    def test_completed_task_update_forbidden(self):
+        # 建一条任务，先完成它
+        j = self.POST("/tasks", {
+            "name": f"TaskC {self.tag}",
+            "description": "done",
+            "deadline": (self.now + timedelta(days=2)).isoformat(),
+            "completed": False,
+            "assignedUser": self.ids["u1"],
+            "assignedUserName": self.u1["name"]
+        })
+        tid = j["data"]["_id"]
+
+        # 标记完成
+        self.PUT(f"/tasks/{tid}", {
+            "name": j["data"]["name"],
+            "description": j["data"]["description"],
+            "deadline": j["data"]["deadline"],
+            "completed": True,
+            "assignedUser": self.ids["u1"],
+            "assignedUserName": self.u1["name"]
+        })
+
+        # 尝试再修改（哪怕只是描述），应 400
+        r = self.s.put(f"{self.base}/tasks/{tid}", json={
+            "name": j["data"]["name"],
+            "description": "should-fail",
+            "deadline": j["data"]["deadline"],
+            "completed": True,
+            "assignedUser": self.ids["u1"],
+            "assignedUserName": self.u1["name"]
+        })
+        if r.status_code == 200:
+            raise AssertionError("PUT on a completed task should return 400 per instructor clarification")
+        print("[OK] Completed task cannot be updated (PUT returns error)")
+
+    def test_cannot_add_completed_task_to_pending(self):
+        # 创建一个已完成的任务
+        j = self.POST("/tasks", {
+            "name": f"TaskDone {self.tag}",
+            "description": "done",
+            "deadline": (self.now + timedelta(days=1)).isoformat(),
+            "completed": True,
+            "assignedUser": "",
+            "assignedUserName": "unassigned"
+        })
+        done_id = j["data"]["_id"]
+
+        # 取 u1 当前 pendingTasks
+        juser = self.GET(f"/users/{self.ids['u1']}")
+        pt = set(juser["data"].get("pendingTasks", []))
+        pt.add(done_id)  # 企图加入已完成任务
+
+        # 发送 PUT，期望 400
+        r = self.s.put(f"{self.base}/users/{self.ids['u1']}", json={
+            "name": juser["data"]["name"],
+            "email": juser["data"]["email"],
+            "pendingTasks": list(pt)
+        })
+        if r.status_code == 200:
+            raise AssertionError("Should not be able to add a completed task to user's pendingTasks (expect 400)")
+        print("[OK] Cannot add completed task to pendingTasks")
+        
+    def test_optional_completed_drop_from_pending(self):
+        j = self.POST("/tasks", {
+            "name": f"Task7 {self.tag}",
+            "description": "d7",
+            "deadline": (self.now + timedelta(days=2)).isoformat(),
+            "completed": False,
+            "assignedUser": self.ids["u1"],
+            "assignedUserName": self.u1["name"]
+        })
+        self.ids["t7"] = j["data"]["_id"]
+
+        # 标记完成
+        self.PUT(f"/tasks/{self.ids['t7']}", {
+            "name": f"Task7 {self.tag}",
+            "description": "d7",
+            "deadline": (self.now + timedelta(days=2)).isoformat(),
+            "completed": True,
+            "assignedUser": self.ids["u1"],
+            "assignedUserName": self.u1["name"]
+        })
+
+        # ✅ 仍然保持分配（不 unassign）
+        jtask = self.GET(f"/tasks/{self.ids['t7']}")
+        assert jtask["data"]["assignedUser"] == self.ids["u1"], "Completed task should not be unassigned"
+
+        # ✅ 但从 pendingTasks 移除
+        j = self.GET(f"/users/{self.ids['u1']}")
+        if self.ids["t7"] in j["data"].get("pendingTasks", []):
+            print("[WARN] Completed task still in pendingTasks (implementation-specific; not failing).")
+        else:
+            print("[OK] Completed task removed from pendingTasks (good)")
+            
 
     def test_get_lists_again(self):
         # 示例：/tasks 与 /users 再各拉一次（收尾）
@@ -411,6 +508,7 @@ class Tester:
 
     # 运行所有测试（按逻辑顺序）
     def run_all(self):
+        # 基础：创建与查询
         self.test_create_users()
         self.test_user_validation()
         self.test_users_queries_and_examples()
@@ -422,13 +520,30 @@ class Tester:
         self.test_get_id_and_select()
         self.test_404s()
 
+        # 双向引用：任务→用户、用户→任务
         self.test_assignment_two_way()
         self.test_put_user_pendingtasks()
         self.test_delete_task_cleanup()
-        self.test_delete_user_unassigns_tasks()
+
+        # —— 老师澄清新增的硬性要求 —— 
+        # 1) 已完成任务不可再被更新（PUT 应返回错误）
+        self.test_completed_task_update_forbidden()
+        # 2) 已完成任务不可加入用户的 pendingTasks（PUT /users 应返回错误）
+        self.test_cannot_add_completed_task_to_pending()
+
+        # 完成后：应从 pendingTasks 移除，但不 unassign
         self.test_optional_completed_drop_from_pending()
+
+        # 改名应同步到任务的 assignedUserName（本用例已去掉误传空 pendingTasks）
         self.test_put_user_name_updates_assignedUserName_warn()
+
+        # 坏输入防御：不存在的 assignedUser / 名字不匹配等
         self.test_bad_assignment_inputs()
+
+        # 删除用户：最后再测，避免影响前面的用例
+        self.test_delete_user_unassigns_tasks()
+
+        # 收尾：再拉一遍列表
         self.test_get_lists_again()
 
 
