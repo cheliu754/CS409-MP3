@@ -163,8 +163,8 @@ router.put("/:id", async (req, res, next) => {
     req.body.deadline = toNumberIfNumericString(req.body.deadline);
 
     const before = task.toObject();
-    if (before.completed === true)
-      return badRequest(res, "cannot update a completed task");
+    // if (before.completed === true)
+    //   return badRequest(res, "cannot update a completed task");
 
     let assignedUser = req.body.assignedUser ? String(req.body.assignedUser) : "";
     let assignedUserName = "unassigned";
