@@ -499,7 +499,114 @@ class Tester:
         else:
             print("[OK] Completed task removed from pendingTasks (good)")
             
+    def test_users_six_params_combo(self):
+        made_ids = []
+        base_names = [f"U-{i:02d} {self.tag}" for i in range(6)]
+        for nm in base_names:
+            j = self.POST("/users", {"name": nm, "email": f"{nm.replace(' ','.')}@ex.com"})
+            made_ids.append(j["data"]["_id"])
 
+        expected_sorted_names = sorted(base_names)
+
+        # ✅ 仅匹配 6 个受控用户（避免 Alice/Bob 干扰）
+        where = {"_id": {"$in": made_ids}}
+
+        # count 应该是 6
+        j_count = self.GET("/users", params={"where": q(where), "count": "true"})
+        assert j_count["data"] == 6, f"users count mismatch, got {j_count['data']}"
+
+        # 全量（足够大的 limit）检验排序
+        j_all = self.GET("/users", params={"where": q(where), "sort": q({"name": 1}), "limit": 1000})
+        names_all = [u["name"] for u in j_all["data"]]
+        assert names_all == expected_sorted_names, "users sort by name asc mismatch"
+
+        # 切片：skip=2, limit=3 => 期望 U-02..U-04
+        j_slice = self.GET(
+            "/users",
+            params={
+                "where": q(where),
+                "sort": q({"name": 1}),
+                "select": q({"email": 0}),
+                "skip": 2,
+                "limit": 3,
+            },
+        )
+        slice_names = [u["name"] for u in j_slice["data"]]
+        assert slice_names == expected_sorted_names[2:5], "users skip/limit slice incorrect"
+        if j_slice["data"]:
+            assert "email" not in j_slice["data"][0], "users select exclusion failed (email present)"
+
+        print("[OK] Users six-params combo (where/sort/select/skip/limit/count)")
+
+
+    def test_tasks_six_params_combo(self):
+        """
+        同时使用 where + sort + select + skip + limit + count：
+        - 构造 6 个受控任务 T-00..T-05，completed 交替 True/False，名字含 tag，未指派
+        - where：name 正则匹配 tag 且 completed=false（只取我们控制的未完成任务）
+        - sort：按 name 升序
+        - select：排除 description
+        - skip/limit：切片校验
+        - count=true：数量一致
+        - 另外再检查一次默认 limit（<=100）不被破坏
+        """
+        # 造 6 个受控任务（名字含 tag，完成状态交替）
+        made = []
+        for i in range(6):
+            nm = f"Task-T-{i:02d} {self.tag}"
+            j = self.POST("/tasks", {
+                "name": nm,
+                "description": f"D{i}",
+                "deadline": (self.now + timedelta(days=30+i)).isoformat(),
+                "completed": (i % 2 == 1),       # 奇数完成，偶数未完成
+                "assignedUser": "",
+                "assignedUserName": "unassigned"
+            })
+            made.append(j["data"])
+
+        # 我们只挑未完成的那 3 个（i=0,2,4）
+        all_names = [t["name"] for t in made]
+        expected_unfinished = sorted([f"Task-T-{i:02d} {self.tag}" for i in range(0,6,2)])  # 0,2,4
+
+        # where：限定 name 含 tag 且 completed=false
+        where = {"name": {"$regex": self.tag}, "completed": False}
+
+        # count=true：应该至少 3（如果库里有别的同 tag 未完成任务，也可能更多）
+        j_count = self.GET("/tasks", params={"where": q(where), "count": "true"})
+        assert isinstance(j_count["data"], int), "tasks count must be integer"
+        assert j_count["data"] >= 3, "tasks count under where should be at least 3 on controlled dataset"
+
+        # 拉全量（足够大的 limit），只取我们造的 3 个未完成
+        j_all = self.GET("/tasks", params={"where": q(where), "sort": q({"name": 1}), "limit": 1000})
+        names_all = [t["name"] for t in j_all["data"] if t["name"] in all_names]
+        # 过滤只保留未完成的那三条
+        names_all = [n for n in names_all if any(n == x for x in expected_unfinished)]
+        assert names_all == expected_unfinished, "tasks sort by name asc mismatch on controlled dataset"
+
+        # 切片：skip=1, limit=1 => 期望只拿到 expected_unfinished[1]
+        j_slice = self.GET(
+            "/tasks",
+            params={
+                "where": q(where),
+                "sort": q({"name": 1}),
+                "select": q({"description": 0}),
+                "skip": 1,
+                "limit": 1,
+            },
+        )
+        slice_names = [t["name"] for t in j_slice["data"] if t["name"] in expected_unfinished]
+        assert slice_names == [expected_unfinished[1]], "tasks skip/limit slice incorrect"
+        if j_slice["data"]:
+            assert "description" not in j_slice["data"][0], "tasks select exclusion failed (description present)"
+
+        # 兜底：默认 limit 仍应 <= 100
+        j_default = self.GET("/tasks")
+        if isinstance(j_default["data"], list):
+            assert len(j_default["data"]) <= 100, "tasks default limit should be <= 100"
+
+        print("[OK] Tasks six-params combo (where/sort/select/skip/limit/count)")
+
+    
     def test_get_lists_again(self):
         # 示例：/tasks 与 /users 再各拉一次（收尾）
         self.GET("/tasks")
@@ -517,33 +624,33 @@ class Tester:
         self.test_task_validation()
         self.test_tasks_queries_and_examples()
 
+        # ✅ 六参数联动：放在这里最稳
+        self.test_users_six_params_combo()
+        self.test_tasks_six_params_combo()
+
         self.test_get_id_and_select()
         self.test_404s()
 
-        # 双向引用：任务→用户、用户→任务
+        # 双向引用
         self.test_assignment_two_way()
         self.test_put_user_pendingtasks()
         self.test_delete_task_cleanup()
 
-        # —— 老师澄清新增的硬性要求 —— 
-        # 1) 已完成任务不可再被更新（PUT 应返回错误）
+        # 老师澄清的硬性规则
         self.test_completed_task_update_forbidden()
-        # 2) 已完成任务不可加入用户的 pendingTasks（PUT /users 应返回错误）
         self.test_cannot_add_completed_task_to_pending()
 
-        # 完成后：应从 pendingTasks 移除，但不 unassign
+        # 完成后的行为 & 改名同步
         self.test_optional_completed_drop_from_pending()
-
-        # 改名应同步到任务的 assignedUserName（本用例已去掉误传空 pendingTasks）
         self.test_put_user_name_updates_assignedUserName_warn()
 
-        # 坏输入防御：不存在的 assignedUser / 名字不匹配等
+        # 坏输入防御
         self.test_bad_assignment_inputs()
 
-        # 删除用户：最后再测，避免影响前面的用例
+        # 删除用户（最后执行，避免影响前面的用例）
         self.test_delete_user_unassigns_tasks()
 
-        # 收尾：再拉一遍列表
+        # 收尾
         self.test_get_lists_again()
 
 
