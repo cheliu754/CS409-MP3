@@ -697,6 +697,175 @@ class APITestCase(unittest.TestCase):
         data = [d["name"] for d in body["data"]]
         self.assertEqual(data, sorted(data, reverse=True))
 
+        # ===================== 语义：完成状态与指派关系 =====================
+
+    def test_complete_task_removes_from_pending_but_keeps_assignment(self):
+        u = self._create_user(name="CompleteKeepAssign", email=mk_email())
+        t = self._create_task(name="Cmpl", deadline=iso_in(3), completed=False,
+                              assignedUser=u["_id"], assignedUserName=u["name"])
+        # 标记完成
+        payload_done = {
+            "name": t["name"],
+            "description": t.get("description",""),
+            "deadline": t["deadline"],
+            "completed": True,
+            "assignedUser": u["_id"],
+            "assignedUserName": u["name"],
+        }
+        r = requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10)
+        b = ensure_envelope(r); self.assertIn(r.status_code,(200,201))
+        self.assertTrue(b["data"]["completed"])
+        # 任务仍保留 assignment
+        self.assertEqual(b["data"]["assignedUser"], u["_id"])
+        self.assertEqual(b["data"]["assignedUserName"], u["name"])
+        # 用户 pendingTasks 中应移除
+        ru = requests.get(f"{USERS}/{u['_id']}", timeout=10)
+        bu = ensure_envelope(ru)["data"]
+        self.assertNotIn(t["_id"], bu.get("pendingTasks", []))
+
+    def test_reassign_completed_task_should_400(self):
+        u1 = self._create_user(name="DoneFrom", email=mk_email())
+        u2 = self._create_user(name="DoneTo", email=mk_email())
+        t = self._create_task(name="DoneReassign", deadline=iso_in(4), completed=False,
+                              assignedUser=u1["_id"], assignedUserName=u1["name"])
+        # 先完成
+        payload_done = {
+            "name": t["name"], "description": t.get("description",""),
+            "deadline": t["deadline"], "completed": True,
+            "assignedUser": u1["_id"], "assignedUserName": u1["name"],
+        }
+        _ = ensure_envelope(requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10))
+        # 再尝试改指派给 u2，应 400
+        payload_reassign = {**payload_done, "assignedUser": u2["_id"], "assignedUserName": u2["name"]}
+        r = requests.put(f"{TASKS}/{t['_id']}", json=payload_reassign, timeout=10)
+        _ = ensure_envelope(r); self.assertEqual(r.status_code, 400)
+
+    def test_complete_then_try_reopen_via_user_pendingTasks_should_400(self):
+        u = self._create_user(name="NoReopen", email=mk_email())
+        t = self._create_task(name="Closed", deadline=iso_in(2), completed=False,
+                              assignedUser=u["_id"], assignedUserName=u["name"])
+        # 完成任务
+        payload_done = {
+            "name": t["name"], "description": t.get("description",""),
+            "deadline": t["deadline"], "completed": True,
+            "assignedUser": u["_id"], "assignedUserName": u["name"],
+        }
+        _ = ensure_envelope(requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10))
+        # 尝试通过 PUT /users/:id 把它加回 pendingTasks（应 400）
+        new_user = {"name": u["name"], "email": u["email"], "pendingTasks": [t["_id"]]}
+        r2 = requests.put(f"{USERS}/{u['_id']}", json=new_user, timeout=10)
+        _ = ensure_envelope(r2); self.assertEqual(r2.status_code, 400)
+
+    # ============== 语义：assignedUserName 必须匹配用户真实 name ==============
+
+    def test_post_task_with_only_assignedUser_autofills_assignedUserName(self):
+        u = self._create_user(name="AutoFillGuy", email=mk_email())
+        t = self._create_task(name="AutoFill", deadline=iso_in(5), assignedUser=u["_id"])
+        # 服务端应自动把 assignedUserName = u.name；completed 默认为 False
+        self.assertEqual(t.get("assignedUserName"), u["name"])
+        self.assertEqual(t.get("assignedUser"), u["_id"])
+
+    def test_post_task_with_mismatched_assignedUserName_400(self):
+        u = self._create_user(name="TruthName", email=mk_email())
+        r = requests.post(TASKS, json={
+            "name":"Mismatch", "deadline": iso_in(6),
+            "assignedUser": u["_id"], "assignedUserName": "WRONG_NAME"
+        }, timeout=10)
+        _ = ensure_envelope(r); self.assertEqual(r.status_code, 400)
+
+    # ============== 语义：用户改名应同步任务的 assignedUserName ==============
+
+    def test_put_user_name_propagates_to_tasks(self):
+        u = self._create_user(name="OldName", email=mk_email())
+        t1 = self._create_task(name="Prop1", deadline=iso_in(2), completed=False,
+                               assignedUser=u["_id"], assignedUserName=u["name"])
+        t2 = self._create_task(name="Prop2", deadline=iso_in(3), completed=False,
+                               assignedUser=u["_id"], assignedUserName=u["name"])
+        # 改名
+        new_name = "NewNameSynced"
+        r = requests.put(f"{USERS}/{u['_id']}", json={"name": new_name, "email": u["email"]}, timeout=10)
+        _ = ensure_envelope(r); self.assertIn(r.status_code, (200,201))
+        # 任务的 assignedUserName 应被同步
+        for tid in (t1["_id"], t2["_id"]):
+            rt = requests.get(f"{TASKS}/{tid}", timeout=10)
+            bt = ensure_envelope(rt)["data"]
+            self.assertEqual(bt.get("assignedUserName"), new_name)
+
+    # ============== :id 端点只需处理 select；其它参数可 400 或忽略 ==============
+
+    def test_id_endpoint_only_select_param(self):
+        u = self._create_user(name="OnlySelect", email=mk_email())
+        # 传入无关 where/limit 等：允许两种行为（返回 400 或忽略返回 200）
+        r = requests.get(f"{USERS}/{u['_id']}?where={qjson({'name':'x'})}&limit=1", timeout=10)
+        _ = ensure_envelope(r)
+        self.assertIn(r.status_code, (200, 400))
+
+        # 合法 select 应 200
+        r2 = requests.get(f"{USERS}/{u['_id']}?select={qjson({'_id':0,'email':0})}", timeout=10)
+        b2 = ensure_envelope(r2); self.assertEqual(r2.status_code, 200)
+        self.assertNotIn("_id", b2["data"]); self.assertNotIn("email", b2["data"])
+
+    # ============== 排序大小写：接受大小写不敏感或 Mongo 默认任一 ==============
+
+    def test_sort_case_sensitivity_permissive(self):
+        # 造大小写混合的名字
+        vals = ["alpha", "Bravo", "charlie", "Delta", "echo", "Foxtrot"]
+        for v in vals:
+            self._create_user(name=f"Case-{v}", email=mk_email())
+        r = requests.get(
+            f"{USERS}?where={qjson({'name':{'$regex':'^Case-'}})}&sort={qjson({'name':1})}",
+            timeout=10
+        )
+        body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
+        got = [d["name"] for d in body["data"]]
+        # 只取后缀部分比较
+        suffixes = [s.split("Case-")[1] for s in got]
+        # 两种合法序：不区分大小写排序 or Python/Mongo 默认（区分大小写，通常大写排前）
+        ci_sorted = sorted(vals, key=lambda x: x.lower())
+        cs_sorted = sorted(vals)  # 代码点顺序，通常大写先于小写
+        self.assertIn(suffixes, [ci_sorted, cs_sorted])
+
+    # ============== 复杂组合：构造稳定排序 + 确定性分页切片校验 ==============
+
+    def test_stable_sorted_pagination_exact_slice(self):
+        # 用确定性 name 序列 + 显式 sort
+        base = [f"Slice-{i:03d}" for i in range(0, 90)]
+        for nm in base:
+            self._create_user(name=nm, email=mk_email())
+        # 按 name 升序，skip=60,limit=20 → 预期 Slice-060..Slice-079
+        r = requests.get(
+            f"{USERS}?where={qjson({'name':{'$regex':'^Slice-'}})}"
+            f"&sort={qjson({'name':1})}&skip=60&limit=20"
+            f"&select={qjson({'_id':0,'name':1})}",
+            timeout=20
+        )
+        body = ensure_envelope(r); self.assertEqual(r.status_code, 200)
+        got = [d["name"] for d in body["data"]]
+        expected = [f"Slice-{i:03d}" for i in range(60, 80)]
+        # 至少应是 expected 的前缀（允许库把历史数据插缀，但顺序和切片应稳定）
+        self.assertEqual(got, expected)
+
+    # ============== 更严密：未完成任务允许换指派，并双向更新 ==============
+
+    def test_reassign_not_completed_updates_both_users_pending(self):
+        u1 = self._create_user(name="SwapA", email=mk_email())
+        u2 = self._create_user(name="SwapB", email=mk_email())
+        t = self._create_task(name="SwapTask", deadline=iso_in(4), completed=False,
+                              assignedUser=u1["_id"], assignedUserName=u1["name"])
+        # 换指派给 u2
+        payload = {
+            "name": t["name"], "description": t.get("description",""),
+            "deadline": t["deadline"], "completed": False,
+            "assignedUser": u2["_id"], "assignedUserName": u2["name"],
+        }
+        r = requests.put(f"{TASKS}/{t['_id']}", json=payload, timeout=10)
+        _ = ensure_envelope(r); self.assertIn(r.status_code,(200,201))
+        # 校验双向维护
+        ru1 = ensure_envelope(requests.get(f"{USERS}/{u1['_id']}", timeout=10))["data"]
+        ru2 = ensure_envelope(requests.get(f"{USERS}/{u2['_id']}", timeout=10))["data"]
+        self.assertNotIn(t["_id"], ru1.get("pendingTasks", []))
+        self.assertIn(t["_id"], ru2.get("pendingTasks", []))
+    
     # ----------------- small helpers -----------------
 
     def _list_users(self):

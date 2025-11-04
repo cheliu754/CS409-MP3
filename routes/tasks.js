@@ -13,15 +13,15 @@ import {
   isValidObjectId,
   toIdStr,
   isEmptyId,
+  parseNonNegInt,
 } from "./_shared.js";
 
 const router = Router();
 
 /**
- * 双向同步（严格版）
- * 规则：
+ * 双向同步（严格版，符合老师澄清）：
  * - 若 taskAfter.completed === true：仅从所有用户 pendingTasks 移除该任务；不改 assignedUser/assignedUserName
- * - 若换人：从旧负责人 $pull，给新负责人 $addToSet（前提：任务未完成）
+ * - 若换人：从旧负责人 $pull，给新负责人 $addToSet（仅当未完成）
  * - 若无人负责：从所有用户 $pull
  */
 async function syncUserPendingStrict(taskBefore, taskAfter) {
@@ -29,24 +29,24 @@ async function syncUserPendingStrict(taskBefore, taskAfter) {
   const oldUid = toIdStr(taskBefore?.assignedUser);
   const newUid = toIdStr(taskAfter.assignedUser);
 
-  // 任务完成：从所有用户 pendingTasks 清理，但不改 assignedUser
+  // 完成：仅清 pending，不改 assignedUser
   if (taskAfter.completed === true) {
     await User.updateMany({ pendingTasks: tid }, { $pull: { pendingTasks: tid } });
     return;
   }
 
-  // 若换人：先从旧人移除
-  if (!isEmptyId(oldUid) && oldUid !== newUid) {
+  // 换人：先从旧人移除
+  if (oldUid && oldUid !== newUid) {
     await User.updateOne({ _id: oldUid }, { $pull: { pendingTasks: tid } });
   }
 
-  // 若有新负责人且未完成：加入新负责人的 pendingTasks
-  if (!isEmptyId(newUid)) {
+  // 新负责人：加入 pending
+  if (newUid) {
     await User.updateOne({ _id: newUid }, { $addToSet: { pendingTasks: tid } });
   }
 
-  // 若无人负责：从所有用户移除
-  if (isEmptyId(newUid)) {
+  // 无人负责：清理所有 pending
+  if (!newUid) {
     await User.updateMany({ pendingTasks: tid }, { $pull: { pendingTasks: tid } });
   }
 }
@@ -59,8 +59,8 @@ router.get("/", async (req, res, next) => {
     const where = parseJsonParam("where", req.query.where, {});
     const sort = parseJsonParam("sort", req.query.sort, undefined);
     const select = sanitizeSelect(parseJsonParam("select", req.query.select, undefined));
-    const skip = Number.isFinite(+req.query.skip) ? +req.query.skip : 0;
-    const limit = req.query.limit !== undefined ? +req.query.limit : 100;
+    const skip = parseNonNegInt("skip", req.query.skip, 0);
+    const limit = parseNonNegInt("limit", req.query.limit, 100); // 默认 100
     const count = String(req.query.count).toLowerCase() === "true";
 
     if (count) {
@@ -87,7 +87,7 @@ router.post("/", async (req, res, next) => {
     // 规范 assignedUser / assignedUserName
     let assignedUser = toIdStr(req.body.assignedUser);
     let assignedUserName = "unassigned";
-    if (!isEmptyId(assignedUser)) {
+    if (assignedUser) {
       const u = await User.findById(assignedUser);
       if (!u) return badRequest(res, "assignedUser does not exist");
       assignedUserName = u.name;
@@ -113,7 +113,7 @@ router.post("/", async (req, res, next) => {
 router.get("/:id", async (req, res, next) => {
   try {
     const id = req.params.id;
-    if (!isValidObjectId(id)) return notFound(res, "task not found");
+    if (!isValidObjectId(id)) return badRequest(res, "invalid id format");
     const select = sanitizeSelect(parseJsonParam("select", req.query.select, undefined));
     const t = await Task.findById(id).select(select).lean();
     if (!t) return notFound(res, "task not found");
@@ -125,7 +125,7 @@ router.get("/:id", async (req, res, next) => {
 router.put("/:id", async (req, res, next) => {
   try {
     const id = req.params.id;
-    if (!isValidObjectId(id)) return notFound(res, "task not found");
+    if (!isValidObjectId(id)) return badRequest(res, "invalid id format");
     const { name, deadline } = req.body || {};
     if (!name || !deadline) return badRequest(res, "name and deadline are required");
 
@@ -133,7 +133,7 @@ router.put("/:id", async (req, res, next) => {
     if (!task) return notFound(res, "task not found");
     const before = task.toObject();
 
-    // 规则（老师说明）：若数据库里该任务已完成，禁止任何更新（包括改名、改指派）。
+    // 老师规则：数据库里已完成的任务禁止任何更新
     if (before.completed === true) {
       const err = new Error("cannot update a completed task");
       err.statusCode = 400;
@@ -143,7 +143,7 @@ router.put("/:id", async (req, res, next) => {
     // 规范 assignedUser / assignedUserName
     let assignedUser = toIdStr(req.body.assignedUser);
     let assignedUserName = "unassigned";
-    if (!isEmptyId(assignedUser)) {
+    if (assignedUser) {
       const u = await User.findById(assignedUser);
       if (!u) return badRequest(res, "assignedUser does not exist");
       assignedUserName = u.name;
@@ -155,7 +155,7 @@ router.put("/:id", async (req, res, next) => {
       name,
       description: req.body.description ?? "",
       deadline,
-      completed: !!req.body.completed, // 如果这次把未完成改为完成，允许；同步器会处理 pendingTasks
+      completed: !!req.body.completed, // 允许这次把未完成标记为完成
       assignedUser,
       assignedUserName,
     });
@@ -169,7 +169,7 @@ router.put("/:id", async (req, res, next) => {
 router.delete("/:id", async (req, res, next) => {
   try {
     const id = req.params.id;
-    if (!isValidObjectId(id)) return notFound(res, "task not found");
+    if (!isValidObjectId(id)) return badRequest(res, "invalid id format");
     const task = await Task.findById(id);
     if (!task) return notFound(res, "task not found");
 
