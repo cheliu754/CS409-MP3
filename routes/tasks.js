@@ -182,7 +182,7 @@ router.put("/:id", async (req, res, next) => {
       name,
       description: req.body.description ?? "",
       deadline: req.body.deadline,      // 交由 Mongoose cast
-      completed: req.body.complete ?? false,    // 字符串布尔也能 cast
+      completed: req.body.completed ?? false,    // 字符串布尔也能 cast
       assignedUser,
       assignedUserName,
     });
