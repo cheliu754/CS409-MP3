@@ -43,7 +43,21 @@ app.use(bodyParser.json());
 // Use routes as a module (see index.js)
 setupRoutes(app, router);
 
+
+// --- Error handling middleware ---
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && "body" in err) {
+    return res.status(400).json({ message: "Invalid JSON body", data: {} });
+  }
+  if (err?.statusCode) {
+    return res.status(err.statusCode).json({ message: err.message, data: {} });
+  }
+  console.error(err);
+  return res.status(500).json({ message: "Server Error", data: {} });
+});
+
 // Start the server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+

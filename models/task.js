@@ -1,3 +1,4 @@
+// models/task.js
 import mongoose from "mongoose";
 
 const TaskSchema = new mongoose.Schema(
@@ -6,11 +7,19 @@ const TaskSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     deadline: { type: Date, required: [true, "deadline is required"] },
     completed: { type: Boolean, default: false },
-    assignedUser: { type: String, default: "" }, // User _id string
+    // MP 要求：String + 默认 ""
+    assignedUser: {
+      type: String,
+      default: "",
+    },
     assignedUserName: { type: String, default: "unassigned" },
-    dateCreated: { type: Date, default: Date.now },
+    dateCreated: { type: Date, default: Date.now, immutable: true },
   },
   { versionKey: false }
 );
+
+TaskSchema.index({ assignedUser: 1 });
+TaskSchema.index({ completed: 1 });
+TaskSchema.index({ deadline: 1 });
 
 export default mongoose.model("Task", TaskSchema);

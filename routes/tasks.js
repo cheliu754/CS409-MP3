@@ -1,52 +1,73 @@
-import express from "express";
+// routes/tasks.js
+import { Router } from "express";
 import Task from "../models/task.js";
 import User from "../models/user.js";
+import {
+  parseJsonParam,
+  sanitizeSelect,
+  ok,
+  created,
+  badRequest,
+  notFound,
+  noContent,
+  isValidObjectId,
+  toIdStr,
+  isEmptyId,
+} from "./_shared.js";
 
-const router = express.Router();
+const router = Router();
 
-/* Helpers */
-const safeJson = (s, fb) => {
-  if (s === undefined) return fb;
-  try {
-    return JSON.parse(s);
-  } catch {
-    return fb;
+/**
+ * 双向同步（严格版）
+ * 规则：
+ * - 若 taskAfter.completed === true：仅从所有用户 pendingTasks 移除该任务；不改 assignedUser/assignedUserName
+ * - 若换人：从旧负责人 $pull，给新负责人 $addToSet（前提：任务未完成）
+ * - 若无人负责：从所有用户 $pull
+ */
+async function syncUserPendingStrict(taskBefore, taskAfter) {
+  const tid = String(taskAfter._id);
+  const oldUid = toIdStr(taskBefore?.assignedUser);
+  const newUid = toIdStr(taskAfter.assignedUser);
+
+  // 任务完成：从所有用户 pendingTasks 清理，但不改 assignedUser
+  if (taskAfter.completed === true) {
+    await User.updateMany({ pendingTasks: tid }, { $pull: { pendingTasks: tid } });
+    return;
   }
-};
 
-const ok = (res, data, message = "OK") => res.status(200).json({ message, data });
-const created = (res, data, message = "Created") => res.status(201).json({ message, data });
-const badRequest = (res, message = "Bad Request", data = {}) => res.status(400).json({ message, data });
-const notFound = (res, message = "Not Found") => res.status(404).json({ message, data: {} });
-const noContent = (res) => res.status(204).send();
+  // 若换人：先从旧人移除
+  if (!isEmptyId(oldUid) && oldUid !== newUid) {
+    await User.updateOne({ _id: oldUid }, { $pull: { pendingTasks: tid } });
+  }
 
-async function syncUserPendingForTask(taskDoc) {
-  const taskId = String(taskDoc._id);
-  // 先从所有用户 pendingTasks 移除
-  await User.updateMany({ pendingTasks: taskId }, { $pull: { pendingTasks: taskId } });
-  // 若该任务被指派且未完成，添加到目标用户 pendingTasks
-  if (taskDoc.assignedUser && !taskDoc.completed) {
-    await User.updateOne(
-      { _id: taskDoc.assignedUser },
-      { $addToSet: { pendingTasks: taskId } }
-    );
+  // 若有新负责人且未完成：加入新负责人的 pendingTasks
+  if (!isEmptyId(newUid)) {
+    await User.updateOne({ _id: newUid }, { $addToSet: { pendingTasks: tid } });
+  }
+
+  // 若无人负责：从所有用户移除
+  if (isEmptyId(newUid)) {
+    await User.updateMany({ pendingTasks: tid }, { $pull: { pendingTasks: tid } });
   }
 }
 
-/* GET /api/tasks */
+/* ======================= Routes ======================= */
+
+// GET /api/tasks
 router.get("/", async (req, res, next) => {
   try {
-    const where = safeJson(req.query.where, {});
-    const sort = safeJson(req.query.sort, undefined);
-    const select = safeJson(req.query.select, undefined);
+    const where = parseJsonParam("where", req.query.where, {});
+    const sort = parseJsonParam("sort", req.query.sort, undefined);
+    const select = sanitizeSelect(parseJsonParam("select", req.query.select, undefined));
     const skip = Number.isFinite(+req.query.skip) ? +req.query.skip : 0;
-    const limit = req.query.limit !== undefined ? +req.query.limit : 100; // tasks 默认 100
+    const limit = req.query.limit !== undefined ? +req.query.limit : 100;
     const count = String(req.query.count).toLowerCase() === "true";
 
     if (count) {
       const c = await Task.countDocuments(where);
       return ok(res, c, "Count");
     }
+
     let q = Task.find(where);
     if (sort) q = q.sort(sort);
     if (select) q = q.select(select);
@@ -57,83 +78,104 @@ router.get("/", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/* POST /api/tasks */
+// POST /api/tasks
 router.post("/", async (req, res, next) => {
   try {
     const { name, deadline } = req.body || {};
     if (!name || !deadline) return badRequest(res, "name and deadline are required");
 
+    // 规范 assignedUser / assignedUserName
+    let assignedUser = toIdStr(req.body.assignedUser);
+    let assignedUserName = "unassigned";
+    if (!isEmptyId(assignedUser)) {
+      const u = await User.findById(assignedUser);
+      if (!u) return badRequest(res, "assignedUser does not exist");
+      assignedUserName = u.name;
+    } else {
+      assignedUser = "";
+    }
+
     const payload = {
       description: "",
       completed: false,
-      assignedUser: "",
-      assignedUserName: "unassigned",
       ...req.body,
+      assignedUser,
+      assignedUserName,
     };
 
-    if (payload.assignedUser) {
-      const user = await User.findById(payload.assignedUser);
-      if (!user) return badRequest(res, "assignedUser does not exist");
-      payload.assignedUserName = user.name;
-    }
-
-    const task = await Task.create(payload);
-    await syncUserPendingForTask(task);
-    return created(res, task.toObject());
+    const t = await Task.create(payload);
+    await syncUserPendingStrict(null, t.toObject());
+    return created(res, t.toObject());
   } catch (e) { next(e); }
 });
 
-/* GET /api/tasks/:id (支持 ?select=JSON) */
+// GET /api/tasks/:id
 router.get("/:id", async (req, res, next) => {
   try {
-    const select = safeJson(req.query.select, undefined);
-    const doc = await Task.findById(req.params.id).select(select).lean();
-    if (!doc) return notFound(res, "task not found");
-    return ok(res, doc);
+    const id = req.params.id;
+    if (!isValidObjectId(id)) return notFound(res, "task not found");
+    const select = sanitizeSelect(parseJsonParam("select", req.query.select, undefined));
+    const t = await Task.findById(id).select(select).lean();
+    if (!t) return notFound(res, "task not found");
+    return ok(res, t);
   } catch (e) { next(e); }
 });
 
-/* PUT /api/tasks/:id —— 整体替换 */
+// PUT /api/tasks/:id
 router.put("/:id", async (req, res, next) => {
   try {
+    const id = req.params.id;
+    if (!isValidObjectId(id)) return notFound(res, "task not found");
     const { name, deadline } = req.body || {};
     if (!name || !deadline) return badRequest(res, "name and deadline are required");
 
-    const task = await Task.findById(req.params.id);
+    const task = await Task.findById(id);
     if (!task) return notFound(res, "task not found");
+    const before = task.toObject();
 
+    // 规则（老师说明）：若数据库里该任务已完成，禁止任何更新（包括改名、改指派）。
+    if (before.completed === true) {
+      const err = new Error("cannot update a completed task");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // 规范 assignedUser / assignedUserName
+    let assignedUser = toIdStr(req.body.assignedUser);
     let assignedUserName = "unassigned";
-    if (req.body.assignedUser) {
-      const user = await User.findById(req.body.assignedUser);
-      if (!user) return badRequest(res, "assignedUser does not exist");
-      assignedUserName = user.name;
+    if (!isEmptyId(assignedUser)) {
+      const u = await User.findById(assignedUser);
+      if (!u) return badRequest(res, "assignedUser does not exist");
+      assignedUserName = u.name;
+    } else {
+      assignedUser = "";
     }
 
     task.set({
-      name: req.body.name,
+      name,
       description: req.body.description ?? "",
-      deadline: req.body.deadline,
-      completed: !!req.body.completed,
-      assignedUser: req.body.assignedUser ?? "",
+      deadline,
+      completed: !!req.body.completed, // 如果这次把未完成改为完成，允许；同步器会处理 pendingTasks
+      assignedUser,
       assignedUserName,
     });
     await task.save();
-
-    await syncUserPendingForTask(task);
+    await syncUserPendingStrict(before, task.toObject());
     return ok(res, task.toObject(), "Updated");
   } catch (e) { next(e); }
 });
 
-/* DELETE /api/tasks/:id —— 从用户 pendingTasks 移除后删除任务 */
+// DELETE /api/tasks/:id
 router.delete("/:id", async (req, res, next) => {
   try {
-    const task = await Task.findById(req.params.id);
+    const id = req.params.id;
+    if (!isValidObjectId(id)) return notFound(res, "task not found");
+    const task = await Task.findById(id);
     if (!task) return notFound(res, "task not found");
 
     const tid = String(task._id);
     await User.updateMany({ pendingTasks: tid }, { $pull: { pendingTasks: tid } });
     await task.deleteOne();
-
     return noContent(res);
   } catch (e) { next(e); }
 });
