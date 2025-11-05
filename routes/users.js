@@ -18,28 +18,26 @@ function buildSort(req) {
   return parseJsonParam("sort", req.query.sort, undefined);
 }
 function buildSelect(req) {
-  const sel = parseJsonParam(
-    "select",
-    req.query.select,
-  );
+  const sel = parseJsonParam("select", req.query.select);
   return sanitizeSelect(sel);
 }
-
 function parsePagination(req, { defaultLimit = null } = {}) {
   const skip = parseNonNegInt("skip", req.query.skip, 0);
   const limit = parseNonNegInt("limit", req.query.limit, defaultLimit);
-  return {
-    skip, limit
-  };
+  return { skip, limit };
 }
 
 async function syncTasksOnUserPendingChange(userId, userName, addedIds = [], removedIds = []) {
   const uid = String(userId);
   const add = (addedIds || []).map(String);
   const del = (removedIds || []).map(String);
-  const addedTasks = await Task.find({ _id: { $in: add }, completed: { $ne: true } })
-    .select("_id assignedUser")
-    .lean();
+
+  const addedTasks = add.length
+    ? await Task.find({ _id: { $in: add }, completed: { $ne: true } })
+        .select("_id assignedUser")
+        .lean()
+    : [];
+
   const prevOwnerIds = [...new Set(
     addedTasks
       .map(t => (t.assignedUser ? String(t.assignedUser) : ""))
@@ -66,14 +64,14 @@ async function syncTasksOnUserPendingChange(userId, userName, addedIds = [], rem
   }
 }
 
-// ROUTES
+
 router.get("/", async (req, res, next) => {
   try {
     const where = buildFindQuery(req);
     const sort = buildSort(req);
     const select = buildSelect(req);
-    const countOnly = String(req.query.count).toLowerCase() === "true";
-    const { skip, limit } = parsePagination(req, { defaultLimit: null }); 
+    const countOnly = String(req.query.count || "").toLowerCase() === "true";
+    const { skip, limit } = parsePagination(req, { defaultLimit: null });
 
     if (countOnly) {
       const c = await User.countDocuments(where);
@@ -83,7 +81,7 @@ router.get("/", async (req, res, next) => {
     const q = User.find(where);
     if (sort) q.sort(sort);
     if (select) q.select(select);
-    q.skip(skip);            
+    q.skip(skip);
     if (limit != null) q.limit(limit);
 
     const data = await q.lean();
@@ -107,10 +105,10 @@ router.post("/", async (req, res, next) => {
     if (nowIds && nowIds.length) {
       for (const item of nowIds) {
         if (!mongoose.Types.ObjectId.isValid(item)) {
-          return badRequest(res, "task not vaild");
+          return badRequest(res, "task not valid");
         }
         const t = await Task.findById(item);
-        if (!t) return badRequest(res, "task not vaild");
+        if (!t) return badRequest(res, "task not valid");
       }
       const doneIds = await Task.find({
         _id: { $in: nowIds },
@@ -135,7 +133,7 @@ router.post("/", async (req, res, next) => {
     if (nowIds && nowIds.length) {
       await syncTasksOnUserPendingChange(u._id, u.name, nowIds, []);
     }
-    
+
     return created(res, u.toObject());
   } catch (e) {
     if (e?.code === 11000) return badRequest(res, "email already exists");
@@ -174,17 +172,18 @@ router.put("/:id", async (req, res, next) => {
     if (!name || !email) return badRequest(res, "name and email are required");
 
     const oldName = user.name;
-    const oldSet = new Set((user.pendingTasks || []).map((x) => String(x)));
-    const nowIds =
-      req.body.pendingTasks !== undefined ? toIdStrArray(req.body.pendingTasks) : null;
+    const oldSet = new Set((user.pendingTasks || []).map(x => String(x)));
 
-    if (nowIds && nowIds.length) {
+    const providedPending = Object.prototype.hasOwnProperty.call(req.body, "pendingTasks");
+    const nowIds = providedPending ? toIdStrArray(req.body.pendingTasks) : [];
+
+    if (providedPending && nowIds.length) {
       for (const item of nowIds) {
         if (!mongoose.Types.ObjectId.isValid(item)) {
-          return badRequest(res, "task not vaild");
+          return badRequest(res, "task not valid");
         }
         const t = await Task.findById(item);
-        if (!t) return badRequest(res, "task not vaild");
+        if (!t) return badRequest(res, "task not valid");
       }
       const doneIds = await Task.find({
         _id: { $in: nowIds },
@@ -200,14 +199,12 @@ router.put("/:id", async (req, res, next) => {
 
     user.name = name;
     user.email = email;
-    if (nowIds) user.pendingTasks = nowIds;
+    user.pendingTasks = nowIds;
     await user.save();
 
-    if (nowIds) {
-      const added = nowIds.filter(x => !oldSet.has(x));
-      const removed = [...oldSet].filter(x => !nowIds.includes(x));
-      await syncTasksOnUserPendingChange(user._id, user.name, added, removed);
-    }
+    const added = nowIds.filter(x => !oldSet.has(x));
+    const removed = [...oldSet].filter(x => !nowIds.includes(x));
+    await syncTasksOnUserPendingChange(user._id, user.name, added, removed);
 
     if (oldName !== name) {
       await Task.updateMany(
