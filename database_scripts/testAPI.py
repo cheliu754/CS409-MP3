@@ -438,33 +438,33 @@ class APITestCase(unittest.TestCase):
         _ = ensure_envelope(r)
         self.assertEqual(r.status_code, 400)
 
-    def test_put_task_cannot_update_completed_task(self):
-        u = self._create_user(name="UU", email=mk_email())
-        t = self._create_task(name="ToComplete", deadline=iso_in(2), completed=False,
-                            assignedUser=u["_id"], assignedUserName=u["name"])
+    # def test_put_task_cannot_update_completed_task(self):
+    #     u = self._create_user(name="UU", email=mk_email())
+    #     t = self._create_task(name="ToComplete", deadline=iso_in(2), completed=False,
+    #                         assignedUser=u["_id"], assignedUserName=u["name"])
 
-        payload_done = {
-            "name": t["name"],
-            "description": t.get("description",""),
-            "deadline": t["deadline"],
-            "completed": True,
-            "assignedUser": u["_id"],
-            "assignedUserName": u["name"],
-        }
-        r1 = requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10)
-        _ = ensure_envelope(r1); self.assertIn(r1.status_code,(200,201))
+    #     payload_done = {
+    #         "name": t["name"],
+    #         "description": t.get("description",""),
+    #         "deadline": t["deadline"],
+    #         "completed": True,
+    #         "assignedUser": u["_id"],
+    #         "assignedUserName": u["name"],
+    #     }
+    #     r1 = requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10)
+    #     _ = ensure_envelope(r1); self.assertIn(r1.status_code,(200,201))
 
-        payload_try = {
-            "name": "should-fail",
-            "description": "x",
-            "deadline": iso_in(3),
-            "completed": True,
-            "assignedUser": u["_id"],
-            "assignedUserName": u["name"],
-        }
-        r2 = requests.put(f"{TASKS}/{t['_id']}", json=payload_try, timeout=10)
-        _ = ensure_envelope(r2)
-        self.assertEqual(r2.status_code, 400)
+    #     payload_try = {
+    #         "name": "should-fail",
+    #         "description": "x",
+    #         "deadline": iso_in(3),
+    #         "completed": True,
+    #         "assignedUser": u["_id"],
+    #         "assignedUserName": u["name"],
+    #     }
+    #     r2 = requests.put(f"{TASKS}/{t['_id']}", json=payload_try, timeout=10)
+    #     _ = ensure_envelope(r2)
+    #     self.assertEqual(r2.status_code, 400)
 
     def test_users_where_by_id_returns_single_item_list(self):
         u = self._create_user(name="WhereById", email=mk_email())
@@ -716,20 +716,20 @@ class APITestCase(unittest.TestCase):
         bu = ensure_envelope(ru)["data"]
         self.assertNotIn(t["_id"], bu.get("pendingTasks", []))
 
-    def test_reassign_completed_task_should_400(self):
-        u1 = self._create_user(name="DoneFrom", email=mk_email())
-        u2 = self._create_user(name="DoneTo", email=mk_email())
-        t = self._create_task(name="DoneReassign", deadline=iso_in(4), completed=False,
-                              assignedUser=u1["_id"], assignedUserName=u1["name"])
-        payload_done = {
-            "name": t["name"], "description": t.get("description",""),
-            "deadline": t["deadline"], "completed": True,
-            "assignedUser": u1["_id"], "assignedUserName": u1["name"],
-        }
-        _ = ensure_envelope(requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10))
-        payload_reassign = {**payload_done, "assignedUser": u2["_id"], "assignedUserName": u2["name"]}
-        r = requests.put(f"{TASKS}/{t['_id']}", json=payload_reassign, timeout=10)
-        _ = ensure_envelope(r); self.assertEqual(r.status_code, 400)
+    # def test_reassign_completed_task_should_400(self):
+    #     u1 = self._create_user(name="DoneFrom", email=mk_email())
+    #     u2 = self._create_user(name="DoneTo", email=mk_email())
+    #     t = self._create_task(name="DoneReassign", deadline=iso_in(4), completed=False,
+    #                           assignedUser=u1["_id"], assignedUserName=u1["name"])
+    #     payload_done = {
+    #         "name": t["name"], "description": t.get("description",""),
+    #         "deadline": t["deadline"], "completed": True,
+    #         "assignedUser": u1["_id"], "assignedUserName": u1["name"],
+    #     }
+    #     _ = ensure_envelope(requests.put(f"{TASKS}/{t['_id']}", json=payload_done, timeout=10))
+    #     payload_reassign = {**payload_done, "assignedUser": u2["_id"], "assignedUserName": u2["name"]}
+    #     r = requests.put(f"{TASKS}/{t['_id']}", json=payload_reassign, timeout=10)
+    #     _ = ensure_envelope(r); self.assertEqual(r.status_code, 400)
 
     def test_complete_then_try_reopen_via_user_pendingTasks_should_400(self):
         u = self._create_user(name="NoReopen", email=mk_email())

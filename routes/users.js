@@ -10,7 +10,6 @@ import {
 
 const router = express.Router();
 
-/* ----------------- helpers: query builders ----------------- */
 function buildFindQuery(req) {
   const where = parseJsonParam("where", req.query.where, {});
   return where || {};
@@ -19,21 +18,68 @@ function buildSort(req) {
   return parseJsonParam("sort", req.query.sort, undefined);
 }
 function buildSelect(req) {
-  // 兼容老脚本的 filter= 作为 select 的别名
   const sel = parseJsonParam(
     "select",
     req.query.select,
-    parseJsonParam("filter", req.query.filter, undefined)
   );
   return sanitizeSelect(sel);
 }
+
 function parsePagination(req, { defaultLimit = null } = {}) {
   const skip = parseNonNegInt("skip", req.query.skip, 0);
   const limit = parseNonNegInt("limit", req.query.limit, defaultLimit);
-  return { skip, limit };
+  return {
+    skip, limit
+  };
 }
 
-/* ------------------------- ROUTES -------------------------- */
+async function syncTasksOnUserPendingChange(userId, userName, addedIds = [], removedIds = []) {
+  const uid = String(userId);
+
+  // 过滤掉无效输入
+  const add = (addedIds || []).map(String);
+  const del = (removedIds || []).map(String);
+
+  // 只处理「未完成」的新增任务；顺便收集这些任务之前的拥有者
+  const addedTasks = await Task.find({ _id: { $in: add }, completed: { $ne: true } })
+    .select("_id assignedUser")
+    .lean();
+
+  const prevOwnerIds = [...new Set(
+    addedTasks
+      .map(t => (t.assignedUser ? String(t.assignedUser) : ""))
+      .filter(x => x && x !== uid)
+  )];
+
+  const addedTaskIds = addedTasks.map(t => String(t._id));
+
+  // 1) 这些新增任务现在都归当前用户
+  if (addedTaskIds.length) {
+    await Task.updateMany(
+      { _id: { $in: addedTaskIds } },
+      { $set: { assignedUser: uid, assignedUserName: userName } }
+    );
+  }
+
+  // 2) 从“原拥有者”的 pendingTasks 里统一 $pull 掉这些任务
+  if (prevOwnerIds.length && addedTaskIds.length) {
+    await User.updateMany(
+      { _id: { $in: prevOwnerIds } },
+      { $pull: { pendingTasks: { $in: addedTaskIds } } }
+    );
+  }
+
+  // 3) 对于本次被移除的任务，如果仍然标记为由当前用户持有，则清空为未指派
+  if (del.length) {
+    await Task.updateMany(
+      { _id: { $in: del }, assignedUser: uid },
+      { $set: { assignedUser: "", assignedUserName: "unassigned" } }
+    );
+  }
+}
+
+
+// ROUTES
 
 // GET /api/users  — where/sort/select/skip/limit/count
 router.get("/", async (req, res, next) => {
@@ -70,6 +116,30 @@ router.post("/", async (req, res, next) => {
   try {
     const { name, email } = req.body || {};
     if (!name || !email) return badRequest(res, "name and email are required");
+
+    const nowIds =
+      req.body.pendingTasks !== undefined ? toIdStrArray(req.body.pendingTasks) : null;
+
+    // 不得把“已完成任务”加入 pendingTasks
+    if (nowIds && nowIds.length) {
+      for (const item of nowIds) {
+        if (!mongoose.Types.ObjectId.isValid(item)) {
+          return badRequest(res, "task not vaild");
+        }
+        const t = await Task.findById(item);
+        if (!t) return badRequest(res, "task not vaild");
+      }
+      const doneIds = await Task.find({
+        _id: { $in: nowIds },
+        completed: true,
+      }).distinct("_id");
+      if (doneIds.length) {
+        return badRequest(
+          res,
+          `cannot add completed tasks to pendingTasks: ${doneIds.map(String).join(",")}`
+        );
+      }
+    }
 
     const u = await User.create({
       name,
@@ -124,6 +194,13 @@ router.put("/:id", async (req, res, next) => {
 
     // 不得把“已完成任务”加入 pendingTasks
     if (nowIds && nowIds.length) {
+      for (const item of nowIds) {
+        if (!mongoose.Types.ObjectId.isValid(item)) {
+          return notFound(res, "task not found");
+        }
+        const t = await Task.findById(item);
+        if (!t) return notFound(res, "task not found");
+      }
       const doneIds = await Task.find({
         _id: { $in: nowIds },
         completed: true,

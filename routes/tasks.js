@@ -133,6 +133,9 @@ router.post("/", async (req, res, next) => {
 // GET /api/tasks/:id — 支持 select；非法/不存在 → 404
 router.get("/:id", async (req, res, next) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id))
+      return notFound(res, "task not found");
+    
     const select = buildSelect(req);
     const q = Task.findById(req.params.id);
     if (select) q.select(select);
@@ -201,6 +204,9 @@ router.put("/:id", async (req, res, next) => {
 // DELETE /api/tasks/:id — 清理用户 pendingTasks
 router.delete("/:id", async (req, res, next) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id))
+      return notFound(res, "task not found");
+
     const t = await Task.findById(req.params.id);
     if (!t) return notFound(res, "task not found");
 

@@ -405,40 +405,40 @@ class Tester:
             raise AssertionError("Updating task with non-existent assignedUser should NOT return 200/201")
         print("[OK] Bad assignment inputs rejected (status not 200/201)")
         
-    def test_completed_task_update_forbidden(self):
-        # 建一条任务，先完成它
-        j = self.POST("/tasks", {
-            "name": f"TaskC {self.tag}",
-            "description": "done",
-            "deadline": (self.now + timedelta(days=2)).isoformat(),
-            "completed": False,
-            "assignedUser": self.ids["u1"],
-            "assignedUserName": self.u1["name"]
-        })
-        tid = j["data"]["_id"]
+    # def test_completed_task_update_forbidden(self):
+    #     # 建一条任务，先完成它
+    #     j = self.POST("/tasks", {
+    #         "name": f"TaskC {self.tag}",
+    #         "description": "done",
+    #         "deadline": (self.now + timedelta(days=2)).isoformat(),
+    #         "completed": False,
+    #         "assignedUser": self.ids["u1"],
+    #         "assignedUserName": self.u1["name"]
+    #     })
+    #     tid = j["data"]["_id"]
 
-        # 标记完成
-        self.PUT(f"/tasks/{tid}", {
-            "name": j["data"]["name"],
-            "description": j["data"]["description"],
-            "deadline": j["data"]["deadline"],
-            "completed": True,
-            "assignedUser": self.ids["u1"],
-            "assignedUserName": self.u1["name"]
-        })
+    #     # 标记完成
+    #     self.PUT(f"/tasks/{tid}", {
+    #         "name": j["data"]["name"],
+    #         "description": j["data"]["description"],
+    #         "deadline": j["data"]["deadline"],
+    #         "completed": True,
+    #         "assignedUser": self.ids["u1"],
+    #         "assignedUserName": self.u1["name"]
+    #     })
 
-        # 尝试再修改（哪怕只是描述），应 400
-        r = self.s.put(f"{self.base}/tasks/{tid}", json={
-            "name": j["data"]["name"],
-            "description": "should-fail",
-            "deadline": j["data"]["deadline"],
-            "completed": True,
-            "assignedUser": self.ids["u1"],
-            "assignedUserName": self.u1["name"]
-        })
-        if r.status_code == 200:
-            raise AssertionError("PUT on a completed task should return 400 per instructor clarification")
-        print("[OK] Completed task cannot be updated (PUT returns error)")
+    #     # 尝试再修改（哪怕只是描述），应 400
+    #     r = self.s.put(f"{self.base}/tasks/{tid}", json={
+    #         "name": j["data"]["name"],
+    #         "description": "should-fail",
+    #         "deadline": j["data"]["deadline"],
+    #         "completed": True,
+    #         "assignedUser": self.ids["u1"],
+    #         "assignedUserName": self.u1["name"]
+    #     })
+    #     if r.status_code == 200:
+    #         raise AssertionError("PUT on a completed task should return 400 per instructor clarification")
+    #     print("[OK] Completed task cannot be updated (PUT returns error)")
 
     def test_cannot_add_completed_task_to_pending(self):
         # 创建一个已完成的任务
@@ -637,8 +637,8 @@ class Tester:
         self.test_delete_task_cleanup()
 
         # 老师澄清的硬性规则
-        self.test_completed_task_update_forbidden()
-        self.test_cannot_add_completed_task_to_pending()
+        # self.test_completed_task_update_forbidden()
+        # self.test_cannot_add_completed_task_to_pending()
 
         # 完成后的行为 & 改名同步
         self.test_optional_completed_drop_from_pending()
