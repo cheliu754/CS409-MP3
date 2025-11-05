@@ -9,13 +9,10 @@ import {
 
 const router = express.Router();
 
-/* ----------------- helpers ----------------- */
 function toNumberIfNumericString(v) {
-  // 让 "1763606400000" 这类数字字符串先转 Number，方便 Mongoose cast 到 Date
   if (typeof v === "string" && /^\d+$/.test(v.trim())) return Number(v);
   return v;
 }
-
 function buildFindQuery(req) {
   const where = parseJsonParam("where", req.query.where, {});
   return where || {};
@@ -24,7 +21,6 @@ function buildSort(req) {
   return parseJsonParam("sort", req.query.sort, undefined);
 }
 function buildSelect(req) {
-  // 兼容老脚本 filter=
   const sel = parseJsonParam(
     "select",
     req.query.select,
@@ -55,9 +51,6 @@ async function syncUserPendingStrict(before, after) {
   }
 }
 
-/* ------------------------- ROUTES -------------------------- */
-
-// GET /api/tasks — 默认 limit=100；支持 count
 router.get("/", async (req, res, next) => {
   try {
     const where = buildFindQuery(req);
@@ -74,7 +67,7 @@ router.get("/", async (req, res, next) => {
     const q = Task.find(where);
     if (sort) q.sort(sort);
     if (select) q.select(select);
-    q.skip(skip);                   // 显式调用，哪怕 0
+    q.skip(skip);              
     if (limit != null) q.limit(limit);
 
     const data = await q.lean();
@@ -87,17 +80,14 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// POST /api/tasks — 必填 name/deadline；deadline 用 Mongoose 解析（失败 → 400）
 router.post("/", async (req, res, next) => {
   try {
     const { name, deadline } = req.body || {};
     if (!name || deadline === undefined || deadline === null)
       return badRequest(res, "name and deadline are required");
 
-    // 预处理 deadline
     req.body.deadline = toNumberIfNumericString(req.body.deadline);
 
-    // 校验/同步 assignment
     let assignedUser = req.body.assignedUser ? String(req.body.assignedUser) : "";
     let assignedUserName = "unassigned";
 
@@ -114,12 +104,12 @@ router.post("/", async (req, res, next) => {
     const payload = {
       description: "",
       ...req.body,
-      completed: req.body.completed ?? false,   // "true"/"false" 字符串会被 Mongoose cast
+      completed: req.body.completed ?? false, 
       assignedUser,
       assignedUserName,
     };
 
-    const t = await Task.create(payload); // deadline cast 失败会抛 Validation/CastError
+    const t = await Task.create(payload);
     await syncUserPendingStrict(null, t.toObject());
     return created(res, t.toObject());
   } catch (e) {
@@ -130,12 +120,11 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-// GET /api/tasks/:id — 支持 select；非法/不存在 → 404
 router.get("/:id", async (req, res, next) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id))
       return notFound(res, "task not found");
-    
+
     const select = buildSelect(req);
     const q = Task.findById(req.params.id);
     if (select) q.select(select);
@@ -149,7 +138,6 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-// PUT /api/tasks/:id — full replace；完成的任务禁止更新；deadline 交由 Mongoose 解析
 router.put("/:id", async (req, res, next) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id))
@@ -162,12 +150,9 @@ router.put("/:id", async (req, res, next) => {
     if (!name || deadline === undefined || deadline === null)
       return badRequest(res, "name and deadline are required");
 
-    // 预处理 deadline
     req.body.deadline = toNumberIfNumericString(req.body.deadline);
 
     const before = task.toObject();
-    // if (before.completed === true)
-    //   return badRequest(res, "cannot update a completed task");
 
     let assignedUser = req.body.assignedUser ? String(req.body.assignedUser) : "";
     let assignedUserName = "unassigned";
@@ -184,13 +169,13 @@ router.put("/:id", async (req, res, next) => {
     task.set({
       name,
       description: req.body.description ?? "",
-      deadline: req.body.deadline,      // 交由 Mongoose cast
-      completed: req.body.completed ?? false,    // 字符串布尔也能 cast
+      deadline: req.body.deadline, 
+      completed: req.body.completed ?? false,  
       assignedUser,
       assignedUserName,
     });
 
-    await task.save();                   // cast 失败 → Validation/CastError
+    await task.save();             
     await syncUserPendingStrict(before, task.toObject());
     return ok(res, task.toObject(), "Updated");
   } catch (e) {
@@ -201,7 +186,6 @@ router.put("/:id", async (req, res, next) => {
   }
 });
 
-// DELETE /api/tasks/:id — 清理用户 pendingTasks
 router.delete("/:id", async (req, res, next) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id))

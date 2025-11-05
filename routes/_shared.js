@@ -1,14 +1,12 @@
 // routes/_shared.js
 import mongoose from "mongoose";
 
-//  Response helpers
 export const ok = (res, data, msg = "OK") => res.status(200).json({ message: msg, data });
 export const created = (res, data, msg = "Created") => res.status(201).json({ message: msg, data });
 export const noContent = (res) => res.status(204).send();
 export const badRequest = (res, msg) => res.status(400).json({ message: msg, data: {} });
 export const notFound = (res, msg) => res.status(404).json({ message: msg, data: {} });
 
-//  ID / params
 export const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 export function toIdStr(val) {
@@ -32,7 +30,6 @@ export function toIdStrArray(v) {
   return out;
 }
 
-//  Query helpers
 export function parseJsonParam(name, raw, fallback) {
   if (raw === undefined) return fallback;
   try {
@@ -44,9 +41,6 @@ export function parseJsonParam(name, raw, fallback) {
   }
 }
 
-/**
- * Mongo 投影：禁止包含式与排除式混用（除 _id 外）
- */
 export function sanitizeSelect(sel) {
   if (!sel) return undefined;
   const entries = Object.entries(sel);
@@ -56,7 +50,6 @@ export function sanitizeSelect(sel) {
   const isExc = entries.some(([, v]) => v === 0 || v === false);
 
   if (isInc && isExc) {
-    // 只允许 _id 例外
     const { _id, ...rest } = sel;
     const restHasExc = Object.values(rest).some((v) => v === 0 || v === false);
     if (restHasExc) {
@@ -68,9 +61,6 @@ export function sanitizeSelect(sel) {
   return sel;
 }
 
-/**
- * 解析非负整数（用于 skip/limit）。非法则抛 400。
- */
 export function parseNonNegInt(name, raw, fallback) {
   if (raw === undefined) return fallback;
   const n = Number(raw);

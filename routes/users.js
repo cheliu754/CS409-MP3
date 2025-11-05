@@ -35,10 +35,8 @@ function parsePagination(req, { defaultLimit = null } = {}) {
 
 async function syncTasksOnUserPendingChange(userId, userName, addedIds = [], removedIds = []) {
   const uid = String(userId);
-  // 过滤掉无效输入
   const add = (addedIds || []).map(String);
   const del = (removedIds || []).map(String);
-  // 只处理「未完成」的新增任务；顺便收集这些任务之前的拥有者
   const addedTasks = await Task.find({ _id: { $in: add }, completed: { $ne: true } })
     .select("_id assignedUser")
     .lean();
@@ -48,21 +46,18 @@ async function syncTasksOnUserPendingChange(userId, userName, addedIds = [], rem
       .filter(x => x && x !== uid)
   )];
   const addedTaskIds = addedTasks.map(t => String(t._id));
-  // 1) 这些新增任务现在都归当前用户
   if (addedTaskIds.length) {
     await Task.updateMany(
       { _id: { $in: addedTaskIds } },
       { $set: { assignedUser: uid, assignedUserName: userName } }
     );
   }
-  // 2) 从“原拥有者”的 pendingTasks 里统一 $pull 掉这些任务
   if (prevOwnerIds.length && addedTaskIds.length) {
     await User.updateMany(
       { _id: { $in: prevOwnerIds } },
       { $pull: { pendingTasks: { $in: addedTaskIds } } }
     );
   }
-  // 3) 对于本次被移除的任务，如果仍然标记为由当前用户持有，则清空为未指派
   if (del.length) {
     await Task.updateMany(
       { _id: { $in: del }, assignedUser: uid },
@@ -72,14 +67,13 @@ async function syncTasksOnUserPendingChange(userId, userName, addedIds = [], rem
 }
 
 // ROUTES
-// GET /api/users  — where/sort/select/skip/limit/count
 router.get("/", async (req, res, next) => {
   try {
     const where = buildFindQuery(req);
     const sort = buildSort(req);
     const select = buildSelect(req);
     const countOnly = String(req.query.count).toLowerCase() === "true";
-    const { skip, limit } = parsePagination(req, { defaultLimit: null }); // users 默认不限
+    const { skip, limit } = parsePagination(req, { defaultLimit: null }); 
 
     if (countOnly) {
       const c = await User.countDocuments(where);
@@ -89,7 +83,7 @@ router.get("/", async (req, res, next) => {
     const q = User.find(where);
     if (sort) q.sort(sort);
     if (select) q.select(select);
-    q.skip(skip);                     // 显式调用，哪怕是 0
+    q.skip(skip);            
     if (limit != null) q.limit(limit);
 
     const data = await q.lean();
@@ -102,7 +96,6 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// POST /api/users  — 必填 name/email；email 唯一
 router.post("/", async (req, res, next) => {
   try {
     const { name, email } = req.body || {};
@@ -111,7 +104,6 @@ router.post("/", async (req, res, next) => {
     const nowIds =
       req.body.pendingTasks !== undefined ? toIdStrArray(req.body.pendingTasks) : null;
 
-    // 不得把“已完成任务”加入 pendingTasks
     if (nowIds && nowIds.length) {
       for (const item of nowIds) {
         if (!mongoose.Types.ObjectId.isValid(item)) {
@@ -154,7 +146,6 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-// GET /api/users/:id — 支持 select；非法/不存在 → 404
 router.get("/:id", async (req, res, next) => {
   try {
     const select = buildSelect(req);
@@ -170,7 +161,6 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-// PUT /api/users/:id — full replace；同步任务；改名同步 assignedUserName
 router.put("/:id", async (req, res, next) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -188,7 +178,6 @@ router.put("/:id", async (req, res, next) => {
     const nowIds =
       req.body.pendingTasks !== undefined ? toIdStrArray(req.body.pendingTasks) : null;
 
-    // 不得把“已完成任务”加入 pendingTasks
     if (nowIds && nowIds.length) {
       for (const item of nowIds) {
         if (!mongoose.Types.ObjectId.isValid(item)) {
@@ -209,21 +198,17 @@ router.put("/:id", async (req, res, next) => {
       }
     }
 
-    // 保存用户本体
     user.name = name;
     user.email = email;
     if (nowIds) user.pendingTasks = nowIds;
     await user.save();
 
-    // 双向维护
     if (nowIds) {
       const added = nowIds.filter(x => !oldSet.has(x));
       const removed = [...oldSet].filter(x => !nowIds.includes(x));
       await syncTasksOnUserPendingChange(user._id, user.name, added, removed);
     }
 
-
-    // 改名 → 同步其所有任务的 assignedUserName
     if (oldName !== name) {
       await Task.updateMany(
         { assignedUser: String(user._id) },
@@ -241,7 +226,6 @@ router.put("/:id", async (req, res, next) => {
   }
 });
 
-// DELETE /api/users/:id — 将其所有任务设为未指派
 router.delete("/:id", async (req, res, next) => {
   try {
     const u = await User.findById(req.params.id);
